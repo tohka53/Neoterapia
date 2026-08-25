@@ -157,15 +157,32 @@ npm run build      # dist/neoterapia/browser
 
 Publicado en **https://neoterapia.vercel.app**.
 
-`vercel.json` ya trae lo necesario: el `outputDirectory` correcto para el builder
-`application` de Angular y —lo importante— el *rewrite* que manda todo a
-`index.html`. Sin ese rewrite, cualquier ruta que no sea `/` da 404: el enlace
-que recibe el paciente (`/cita/confirmar?t=…`) y todo `/panel/*` incluidos.
+`vercel.json` trae el `outputDirectory` del builder `application` de Angular y
+—lo importante— el enrutado del SPA: todo lo que no sea un archivo real se sirve
+como `index.html`. Sin eso, cualquier ruta que no sea `/` da 404, incluidos el
+enlace que recibe el paciente (`/cita/confirmar?t=…`) y todo `/panel/*`.
 
-También manda `X-Robots-Tag: noindex` y `Referrer-Policy: no-referrer` en
-`/cita/*`: los enlaces de un solo uso del paciente no deben terminar indexados
+**Va escrito con `routes` y no con `rewrites`, a propósito.** Las `rewrites` se
+aplican *después* de la configuración que Vercel genera cuando detecta el
+framework; con el proyecto detectado como Angular esa configuración gana y la
+reescritura del SPA nunca corre: la portada abre y `/acceso` devuelve el 404 de
+Vercel. `routes` es la forma de bajo nivel y tiene prioridad absoluta.
+
+A cambio, `routes` es excluyente: no se puede combinar con `rewrites`, `headers`,
+`redirects`, `cleanUrls` ni `trailingSlash` — si agrega cualquiera de esas
+llaves, el deploy falla la validación. Por eso las cabeceras van dentro de
+`routes` con `continue: true` (aplica la cabecera y sigue evaluando), y el orden
+es: cabeceras → `handle: filesystem` (sirve los archivos reales: JS, CSS,
+`robots.txt`, `og.png`) → comodín a `index.html`.
+
+Entre esas cabeceras van `X-Robots-Tag: noindex` y `Referrer-Policy: no-referrer`
+en `/cita/*`: los enlaces de un solo uso del paciente no deben terminar indexados
 ni filtrar su token por la cabecera `Referer`. `public/robots.txt` dice lo mismo,
 pero robots.txt es una petición y la cabecera es una orden.
+
+Si aun así una ruta profunda da 404, el sospechoso es el proyecto en Vercel:
+**Settings → Build & Deployment → Framework Preset** en *Other*, y **Root
+Directory** vacío (la raíz del repo, donde vive `vercel.json`).
 
 Después de desplegar hay **tres sitios** donde ajustar la URL, y los tres importan:
 
