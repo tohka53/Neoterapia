@@ -1,0 +1,108 @@
+import { Injectable, inject, signal } from '@angular/core';
+import { SupabaseService } from '../supabase.service';
+import { AreaCuerpo, Perfil, Slot, Tratamiento } from '../modelos';
+
+@Injectable({ providedIn: 'root' })
+export class CatalogosService {
+  private readonly sb = inject(SupabaseService);
+
+  /** Catálogo del mapa corporal. Se cachea: cambia muy rara vez. */
+  readonly areas = signal<AreaCuerpo[]>([]);
+  private promesaAreas: Promise<AreaCuerpo[]> | null = null;
+
+  async cargarAreas(): Promise<AreaCuerpo[]> {
+    if (this.areas().length) return this.areas();
+    this.promesaAreas ??= this.sb.rpc<AreaCuerpo[]>('areas_mapa').then((r) => {
+      this.areas.set(r ?? []);
+      return r ?? [];
+    });
+    return this.promesaAreas;
+  }
+
+  /**
+   * Mapa codigo → id de las áreas. `areas_mapa()` (la RPC pública) no expone
+   * los ids a propósito; el personal sí puede leerlos de la tabla.
+   */
+  private idsAreas: Map<string, string> | null = null;
+  async idsDeAreas(): Promise<Map<string, string>> {
+    if (this.idsAreas) return this.idsAreas;
+    const { data, error } = await this.sb.desde('areas_cuerpo').select('id, codigo');
+    if (error) throw error;
+    this.idsAreas = new Map((data ?? []).map((a: any) => [a.codigo as string, a.id as string]));
+    return this.idsAreas;
+  }
+
+  /** Disponibilidad pública. Nunca devuelve datos de pacientes. */
+  async slots(fecha: string, fisioterapeutaId?: string | null): Promise<Slot[]> {
+    return (await this.sb.rpc<Slot[]>('slots_disponibles', {
+      p_fecha: fecha,
+      p_fisioterapeuta_id: fisioterapeutaId ?? null,
+    })) ?? [];
+  }
+
+  async fisioterapeutas(): Promise<Perfil[]> {
+    const { data, error } = await this.sb
+      .desde('perfiles')
+      .select('*')
+      .eq('rol', 'fisioterapeuta')
+      .eq('activo', true)
+      .order('nombre_completo');
+    if (error) throw error;
+    return (data ?? []) as Perfil[];
+  }
+
+  async personal(): Promise<Perfil[]> {
+    const { data, error } = await this.sb
+      .desde('perfiles').select('*').order('rol').order('nombre_completo');
+    if (error) throw error;
+    return (data ?? []) as Perfil[];
+  }
+
+  async tratamientos(soloActivos = true): Promise<Tratamiento[]> {
+    let q = this.sb.desde('tratamientos').select('*').order('nombre');
+    if (soloActivos) q = q.eq('activo', true);
+    const { data, error } = await q;
+    if (error) throw error;
+    return (data ?? []) as Tratamiento[];
+  }
+
+  async guardarTratamiento(t: Partial<Tratamiento>): Promise<void> {
+    const { error } = t.id
+      ? await this.sb.desde('tratamientos').update(t).eq('id', t.id)
+      : await this.sb.desde('tratamientos').insert(t);
+    if (error) throw error;
+  }
+
+  async configuracion(): Promise<Record<string, unknown>> {
+    const { data, error } = await this.sb.desde('configuracion').select('clave, valor, descripcion');
+    if (error) throw error;
+    const mapa: Record<string, unknown> = {};
+    for (const fila of data ?? []) mapa[(fila as any).clave] = (fila as any).valor;
+    return mapa;
+  }
+
+  async guardarConfiguracion(clave: string, valor: unknown): Promise<void> {
+    const { error } = await this.sb.desde('configuracion').update({ valor }).eq('clave', clave);
+    if (error) throw error;
+  }
+
+  async horarios() {
+    const { data, error } = await this.sb
+      .desde('horarios_atencion').select('*, perfiles(nombre_completo)')
+      .order('dia_semana').order('hora_inicio');
+    if (error) throw error;
+    return data ?? [];
+  }
+
+  async guardarHorario(h: Record<string, unknown>) {
+    const { error } = h['id']
+      ? await this.sb.desde('horarios_atencion').update(h).eq('id', h['id'] as string)
+      : await this.sb.desde('horarios_atencion').insert(h);
+    if (error) throw error;
+  }
+
+  async eliminarHorario(id: string) {
+    const { error } = await this.sb.desde('horarios_atencion').delete().eq('id', id);
+    if (error) throw error;
+  }
+}
