@@ -24,6 +24,11 @@ export class AuthService {
   readonly esSuperadmin = computed(() => this.rol() === 'superadmin');
   readonly esRecepcion = computed(() => this.rol() === 'recepcion');
   readonly esFisio = computed(() => this.rol() === 'fisioterapeuta');
+  /**
+   * Pasa consulta. No es lo mismo que el rol: el superadministrador de una
+   * clínica pequeña suele atender pacientes además de administrar.
+   */
+  readonly atiende = computed(() => this.perfil()?.atiende === true);
   /** Coordina agenda: recepción y administración. */
   readonly coordina = computed(() => this.esAdmin() || this.esRecepcion());
   /** Ve información clínica: fisioterapeutas y administración, nunca recepción. */

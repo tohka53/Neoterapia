@@ -575,4 +575,539 @@ begin
 end $$;
 
 \echo ''
+\echo '== 14. Alta de usuarios del personal desde el panel =='
+do $$
+declare r jsonb; v_id uuid;
+begin
+  -- Recepcion no puede crear usuarios
+  perform set_config('neoterapia.test_uid', '33333333-3333-3333-3333-333333333333', true);
+  begin
+    r := public.crear_usuario_personal('x@y.com', 'unaClaveLarga1', 'Nuevo Usuario', 'admin');
+    perform pg_temp.ok(false, 'Recepcion NO deberia poder crear usuarios');
+  exception when insufficient_privilege then
+    perform pg_temp.ok(true, 'Recepcion no puede crear usuarios');
+  end;
+
+  -- Un admin normal tampoco: solo superadmin
+  perform set_config('neoterapia.test_uid', '22222222-2222-2222-2222-222222222222', true);
+  begin
+    r := public.crear_usuario_personal('x@y.com', 'unaClaveLarga1', 'Nuevo Usuario', 'admin');
+    perform pg_temp.ok(false, 'Un admin NO deberia poder crear usuarios');
+  exception when insufficient_privilege then
+    perform pg_temp.ok(true, 'Un administrador tampoco puede crear usuarios');
+  end;
+
+  -- Superadmin si
+  perform set_config('neoterapia.test_uid', '11111111-1111-1111-1111-111111111111', true);
+
+  r := public.crear_usuario_personal('correo-malo', 'unaClaveLarga1', 'Nuevo Usuario', 'admin');
+  perform pg_temp.ok((r ->> 'error') = 'correo_invalido', 'Rechaza correos con formato invalido');
+
+  r := public.crear_usuario_personal('nuevo@neoterapia.gt', 'corta', 'Nuevo Usuario', 'admin');
+  perform pg_temp.ok((r ->> 'error') = 'clave_corta', 'Exige contrasena de al menos 10 caracteres');
+
+  r := public.crear_usuario_personal('nuevo@neoterapia.gt', 'unaClaveLarga1', 'Solo', 'admin');
+  perform pg_temp.ok((r ->> 'error') = 'nombre_invalido', 'Exige nombre y apellido');
+
+  r := public.crear_usuario_personal('super@neoterapia.gt', 'unaClaveLarga1', 'Otro Usuario', 'admin');
+  perform pg_temp.ok((r ->> 'error') = 'correo_existente', 'No permite dos usuarios con el mismo correo');
+
+  r := public.crear_usuario_personal(
+    '  NUEVO@NeoTerapia.GT ', 'unaClaveLarga1', 'Carla Fisio Nueva',
+    'fisioterapeuta', '5555-0000', 'COL-1234', 'Deportiva', '#7c3aed');
+  perform pg_temp.ok((r ->> 'ok')::boolean, 'El superadministrador crea el usuario');
+  v_id := (r ->> 'usuario_id')::uuid;
+
+  perform pg_temp.ok(
+    (select email = 'nuevo@neoterapia.gt' from auth.users where id = v_id),
+    'El correo se normaliza a minusculas y sin espacios');
+  perform pg_temp.ok(
+    (select email_confirmed_at is not null from auth.users where id = v_id),
+    'El correo queda confirmado (lo dio de alta un superadministrador)');
+  perform pg_temp.ok(
+    (select encrypted_password = extensions.crypt('unaClaveLarga1', encrypted_password)
+       from auth.users where id = v_id),
+    'La contrasena queda cifrada con bcrypt y valida correctamente');
+  perform pg_temp.ok(
+    (select count(*) from auth.identities where user_id = v_id) = 1,
+    'Se crea la identidad de correo asociada');
+  perform pg_temp.ok(
+    (select rol = 'fisioterapeuta' and activo and colegiado = 'COL-1234'
+       from public.perfiles where id = v_id),
+    'El perfil queda con el rol y los datos indicados');
+  perform pg_temp.ok(
+    exists (select 1 from public.auditoria
+            where entidad = 'perfiles' and entidad_id = v_id::text),
+    'El alta queda registrada en auditoria');
+
+  -- Restablecer contrasena
+  r := public.restablecer_contrasena(v_id, 'otraClaveLarga99');
+  perform pg_temp.ok((r ->> 'ok')::boolean, 'El superadministrador restablece contrasenas');
+  perform pg_temp.ok(
+    (select encrypted_password = extensions.crypt('otraClaveLarga99', encrypted_password)
+       from auth.users where id = v_id),
+    'La contrasena nueva queda activa');
+
+  perform set_config('neoterapia.test_uid', '22222222-2222-2222-2222-222222222222', true);
+  begin
+    r := public.restablecer_contrasena(v_id, 'terceraClave123');
+    perform pg_temp.ok(false, 'Un admin NO deberia restablecer contrasenas ajenas');
+  exception when insufficient_privilege then
+    perform pg_temp.ok(true, 'Un administrador no puede restablecer contrasenas ajenas');
+  end;
+end $$;
+
+\echo ''
+\echo '== 15. Inventario =='
+do $$
+declare
+  r jsonb; v_art uuid; v_ex numeric;
+begin
+  select id into v_art from public.inventario_articulos where codigo = 'INS-ELEC';
+  perform pg_temp.ok(v_art is not null, 'El inventario arranca con articulos del seed');
+  perform pg_temp.ok(
+    (select existencia = 0 from public.inventario_articulos where id = v_art),
+    'Los articulos arrancan en cero: la existencia se carga con movimientos');
+
+  -- Recepcion no mueve inventario
+  perform set_config('neoterapia.test_uid', '33333333-3333-3333-3333-333333333333', true);
+  begin
+    r := public.registrar_movimiento_inventario(v_art, 'entrada', 10);
+    perform pg_temp.ok(false, 'Recepcion NO deberia mover el inventario');
+  exception when insufficient_privilege then
+    perform pg_temp.ok(true, 'Recepcion no puede mover el inventario');
+  end;
+  perform pg_temp.ok(
+    (select count(*) from public.inventario_articulos) > 0,
+    'Recepcion si puede consultar las existencias');
+
+  -- Un fisioterapeuta tampoco
+  perform set_config('neoterapia.test_uid', '44444444-4444-4444-4444-444444444444', true);
+  begin
+    r := public.registrar_movimiento_inventario(v_art, 'entrada', 10);
+    perform pg_temp.ok(false, 'Un fisioterapeuta NO deberia mover el inventario');
+  exception when insufficient_privilege then
+    perform pg_temp.ok(true, 'El fisioterapeuta no puede mover el inventario');
+  end;
+
+  -- Administracion si
+  perform set_config('neoterapia.test_uid', '22222222-2222-2222-2222-222222222222', true);
+
+  r := public.registrar_movimiento_inventario(v_art, 'entrada', 24, 'Compra inicial', 'FAC-001');
+  perform pg_temp.ok((r ->> 'ok')::boolean, 'Administracion registra una entrada');
+  perform pg_temp.ok((r ->> 'existencia')::numeric = 24, 'La entrada suma a la existencia');
+
+  r := public.registrar_movimiento_inventario(v_art, 'salida', 4, 'Uso en terapia');
+  perform pg_temp.ok((r ->> 'existencia')::numeric = 20, 'La salida resta de la existencia');
+
+  r := public.registrar_movimiento_inventario(v_art, 'merma', 2, 'Empaque danado');
+  perform pg_temp.ok((r ->> 'existencia')::numeric = 18, 'La merma resta de la existencia');
+
+  r := public.registrar_movimiento_inventario(v_art, 'salida', 999, 'Prueba de sobregiro');
+  perform pg_temp.ok((r ->> 'error') = 'sin_existencia',
+    'No se puede sacar mas de lo que hay');
+  perform pg_temp.ok(
+    (select existencia = 18 from public.inventario_articulos where id = v_art),
+    'El intento fallido no altero la existencia');
+
+  r := public.registrar_movimiento_inventario(v_art, 'ajuste', 15, 'Conteo fisico de fin de mes');
+  perform pg_temp.ok((r ->> 'existencia')::numeric = 15,
+    'El ajuste FIJA la existencia al conteo fisico');
+
+  r := public.registrar_movimiento_inventario(v_art, 'entrada', -5);
+  perform pg_temp.ok((r ->> 'error') = 'cantidad_invalida', 'Rechaza cantidades negativas');
+
+  -- La bitacora cuadra: los intentos fallidos no dejan rastro (rollback al
+  -- savepoint implicito del bloque exception), asi que son 4 y no 6.
+  perform pg_temp.ok(
+    (select count(*) from public.inventario_movimientos where articulo_id = v_art) = 4,
+    'Solo quedan registrados los 4 movimientos que si se aplicaron');
+  perform pg_temp.ok(
+    (select existencia_resultante = 15 from public.inventario_movimientos
+      where articulo_id = v_art and tipo = 'ajuste'),
+    'El movimiento guarda la existencia resultante');
+  perform pg_temp.ok(
+    (select bool_and(realizado_por = '22222222-2222-2222-2222-222222222222')
+       from public.inventario_movimientos where articulo_id = v_art),
+    'Cada movimiento guarda quien lo hizo');
+
+  -- La existencia no se toca a mano
+  begin
+    update public.inventario_articulos set existencia = 9999 where id = v_art;
+    perform pg_temp.ok(false, 'La existencia NO deberia editarse directamente');
+  exception when insufficient_privilege then
+    perform pg_temp.ok(true, 'La existencia no se puede editar a mano, solo con movimientos');
+  end;
+
+  -- La bitacora es inmutable
+  begin
+    delete from public.inventario_movimientos where articulo_id = v_art;
+    perform pg_temp.ok(false, 'Los movimientos NO deberian borrarse');
+  exception when insufficient_privilege then
+    perform pg_temp.ok(true, 'Los movimientos de inventario no se borran');
+  end;
+
+  -- Bajo minimo
+  update public.inventario_articulos set minimo = 20 where id = v_art;
+  perform pg_temp.ok(
+    (select bajo_minimo from public.v_inventario where id = v_art),
+    'La vista marca el articulo por debajo del minimo');
+  perform pg_temp.ok(
+    ((public.resumen_inventario()) ->> 'bajo_minimo')::int >= 1,
+    'El resumen cuenta los articulos bajo minimo');
+end $$;
+
+\echo ''
+\echo '== 16. El catalogo de tratamientos ya no lleva precio =='
+do $$
+begin
+  perform pg_temp.ok(
+    not exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'tratamientos' and column_name = 'precio'),
+    'La columna precio ya no existe en el catalogo');
+  perform pg_temp.ok(
+    exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'sesion_tratamientos'
+        and column_name = 'precio_aplicado'),
+    'El monto por aplicacion se conserva en la sesion');
+  perform pg_temp.ok(
+    not exists (select 1 from pg_proc where proname = 'tg_heredar_precio_tratamiento'),
+    'El trigger que heredaba el precio del catalogo fue retirado');
+end $$;
+
+\echo ''
+\echo '== 17. El fisioterapeuta es opcional al agendar =='
+do $$
+declare
+  v_sol jsonb; v_cita uuid; r jsonb;
+begin
+  perform set_config('neoterapia.test_uid', '33333333-3333-3333-3333-333333333333', true);
+
+  v_sol := public.solicitar_cita(jsonb_build_object(
+    'dpi', '0716202140101', 'nombre_completo', 'Sin Fisio Asignado',
+    'telefono', '4444-9999', 'fecha', (current_date + 30)::text,
+    'acepta_politica', true,
+    'areas', jsonb_build_array(jsonb_build_object('codigo', 'cervical', 'intensidad', 4))));
+  select id into v_cita from public.citas where codigo_referencia = v_sol ->> 'codigo_referencia';
+
+  -- Confirmar sin pasar fisioterapeuta
+  r := public.confirmar_cita(v_cita, now() + interval '30 days');
+  perform pg_temp.ok((r ->> 'ok')::boolean, 'Se puede confirmar sin asignar fisioterapeuta');
+  perform pg_temp.ok((r ->> 'sin_fisioterapeuta')::boolean, 'La respuesta avisa que quedo sin asignar');
+  perform pg_temp.ok(
+    (select fisioterapeuta_id is null and estado = 'confirmada' from public.citas where id = v_cita),
+    'La cita queda confirmada y sin fisioterapeuta');
+  perform pg_temp.ok(
+    (select count(*) from public.mensajes where cita_id = v_cita and tipo = 'confirmacion') = 1,
+    'Al paciente se le confirma igual');
+
+  -- Recepcion no puede cerrarla como atendida sin autor de la nota
+  r := public.marcar_asistencia(v_cita, true);
+  perform pg_temp.ok((r ->> 'error') = 'falta_fisioterapeuta',
+    'Sin fisioterapeuta no se puede marcar atendida: la nota necesita autor');
+  perform pg_temp.ok(
+    (select estado = 'confirmada' from public.citas where id = v_cita),
+    'La cita no cambio de estado en el intento fallido');
+
+  -- Pero si puede marcar la inasistencia
+  declare v_otra uuid; v_sol2 jsonb;
+  begin
+    v_sol2 := public.solicitar_cita(jsonb_build_object(
+      'dpi', '0716202140101', 'nombre_completo', 'Sin Fisio Asignado',
+      'telefono', '4444-9999', 'fecha', (current_date + 31)::text,
+      'acepta_politica', true,
+      'areas', jsonb_build_array(jsonb_build_object('codigo', 'cervical', 'intensidad', 4))));
+    select id into v_otra from public.citas where codigo_referencia = v_sol2 ->> 'codigo_referencia';
+    perform public.confirmar_cita(v_otra, now() + interval '31 days');
+    r := public.marcar_asistencia(v_otra, false);
+    perform pg_temp.ok((r ->> 'ok')::boolean, 'La inasistencia si se registra sin fisioterapeuta');
+  end;
+
+  -- Asignar despues
+  r := public.asignar_fisioterapeuta(v_cita, '55555555-5555-5555-5555-555555555555');
+  perform pg_temp.ok((r ->> 'ok')::boolean, 'Se asigna el fisioterapeuta despues');
+  perform pg_temp.ok(
+    (select fisioterapeuta_id = '55555555-5555-5555-5555-555555555555'
+       from public.citas where id = v_cita),
+    'La cita queda con el fisioterapeuta asignado');
+  perform pg_temp.ok(
+    (select count(*) from public.mensajes where cita_id = v_cita and tipo = 'confirmacion') = 1,
+    'Asignar NO reenvia el mensaje de confirmacion al paciente');
+
+  -- No se puede asignar a alguien que no atiende pacientes
+  r := public.asignar_fisioterapeuta(v_cita, '33333333-3333-3333-3333-333333333333');
+  perform pg_temp.ok((r ->> 'error') = 'no_atiende',
+    'No se puede asignar a recepcion como quien atiende');
+
+  -- Ahora si se puede atender
+  r := public.marcar_asistencia(v_cita, true);
+  perform pg_temp.ok((r ->> 'ok')::boolean, 'Con fisioterapeuta asignado ya se marca atendida');
+  perform pg_temp.ok(
+    (select fisioterapeuta_id = '55555555-5555-5555-5555-555555555555'
+       from public.sesiones where cita_id = v_cita),
+    'La sesion queda a nombre del fisioterapeuta de la cita');
+end $$;
+
+do $$
+declare v_sol jsonb; v_cita uuid; r jsonb;
+begin
+  -- Un fisioterapeuta que atiende una cita sin asignar queda como autor
+  perform set_config('neoterapia.test_uid', '33333333-3333-3333-3333-333333333333', true);
+  v_sol := public.solicitar_cita(jsonb_build_object(
+    'dpi', '8322002390703', 'nombre_completo', 'Otro Paciente Prueba',
+    'telefono', '4444-8888', 'fecha', (current_date + 33)::text,
+    'acepta_politica', true,
+    'areas', jsonb_build_array(jsonb_build_object('codigo', 'lumbar', 'intensidad', 5))));
+  select id into v_cita from public.citas where codigo_referencia = v_sol ->> 'codigo_referencia';
+  perform public.confirmar_cita(v_cita, now() + interval '33 days');
+
+  perform set_config('neoterapia.test_uid', '44444444-4444-4444-4444-444444444444', true);
+  r := public.marcar_asistencia(v_cita, true);
+  perform pg_temp.ok((r ->> 'ok')::boolean,
+    'El fisioterapeuta puede atender una cita que nadie tenia asignada');
+  perform pg_temp.ok(
+    (select fisioterapeuta_id = '44444444-4444-4444-4444-444444444444'
+       from public.citas where id = v_cita),
+    'Al atenderla, la cita queda a su nombre');
+  perform pg_temp.ok(
+    (select fisioterapeuta_id = '44444444-4444-4444-4444-444444444444'
+       from public.sesiones where cita_id = v_cita),
+    'Y la nota clinica tambien');
+end $$;
+
+\echo ''
+\echo '== 18. El mapa corporal se guarda y se lee por momento =='
+do $$
+declare
+  v_pac uuid; v_ses uuid; v_n int; m record;
+begin
+  perform set_config('neoterapia.test_uid', '22222222-2222-2222-2222-222222222222', true);
+  select id into v_pac from public.pacientes where dpi_norm = '6018159041102';
+
+  select count(*) into v_n from public.historial_mapa_corporal(v_pac);
+  perform pg_temp.ok(v_n >= 2,
+    format('El historial trae varios momentos, no uno solo (%s)', v_n));
+
+  perform pg_temp.ok(
+    exists (select 1 from public.historial_mapa_corporal(v_pac) where momento_tipo = 'solicitud'),
+    'Incluye lo que el paciente marco al solicitar');
+  perform pg_temp.ok(
+    exists (select 1 from public.historial_mapa_corporal(v_pac) where momento_tipo = 'sesion'),
+    'Incluye lo que el fisioterapeuta registro en sesion');
+
+  select * into m from public.historial_mapa_corporal(v_pac)
+   where momento_tipo = 'sesion' order by fecha limit 1;
+  perform pg_temp.ok(jsonb_array_length(m.areas) > 0, 'Cada momento trae su mapa completo');
+  perform pg_temp.ok(m.dolor_maximo between 0 and 10, 'Trae el dolor maximo del momento');
+  perform pg_temp.ok(m.responsable is not null, 'La sesion dice quien la registro');
+
+  -- Dos sesiones del mismo paciente conservan mapas distintos
+  select s.id into v_ses from public.sesiones s where s.paciente_id = v_pac limit 1;
+  perform pg_temp.ok(
+    (select count(distinct sesion_id) from public.sesion_areas sa
+      join public.sesiones s2 on s2.id = sa.sesion_id
+     where s2.paciente_id = v_pac) >= 1,
+    'El mapa vive colgado de la sesion, no del paciente');
+
+  perform pg_temp.ok(
+    not exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'pacientes'
+        and column_name like '%area%'),
+    'No hay ningun mapa "permanente" pegado a la ficha del paciente');
+end $$;
+
+do $$
+declare v_pac uuid;
+begin
+  -- Recepcion ve la solicitud del paciente pero NO el mapa clinico
+  select id into v_pac from public.pacientes where dpi_norm = '6018159041102';
+  perform set_config('neoterapia.test_uid', '33333333-3333-3333-3333-333333333333', true);
+  perform pg_temp.ok(
+    not exists (select 1 from public.historial_mapa_corporal(v_pac) where momento_tipo = 'sesion'),
+    'Recepcion no ve los mapas registrados en sesion');
+  perform pg_temp.ok(
+    exists (select 1 from public.historial_mapa_corporal(v_pac) where momento_tipo = 'solicitud'),
+    'Recepcion si ve lo que el paciente declaro al pedir la cita');
+end $$;
+
+\echo ''
+\echo '== 19. Indicadores (KPIs) =='
+do $$
+declare
+  k jsonb; v_pac uuid; v_cita uuid; n int;
+begin
+  perform set_config('neoterapia.test_uid', '44444444-4444-4444-4444-444444444444', true);
+  begin
+    k := public.kpis_resumen(current_date - 60, current_date + 60);
+    perform pg_temp.ok(false, 'Un fisioterapeuta NO deberia ver los indicadores');
+  exception when insufficient_privilege then
+    perform pg_temp.ok(true, 'El fisioterapeuta no ve los indicadores de cobro');
+  end;
+
+  perform set_config('neoterapia.test_uid', '22222222-2222-2222-2222-222222222222', true);
+  k := public.kpis_resumen(current_date - 60, current_date + 60);
+  perform pg_temp.ok(k ? 'atendidas' and k ? 'canceladas' and k ? 'ingresos',
+    'El resumen trae atendidas, canceladas e ingresos');
+  perform pg_temp.ok((k ->> 'atendidas')::int > 0, 'Cuenta las citas atendidas del periodo');
+  perform pg_temp.ok((k ->> 'canceladas')::int > 0, 'Cuenta las canceladas');
+  perform pg_temp.ok((k ->> 'pacientes_atendidos')::int > 0, 'Cuenta pacientes distintos atendidos');
+  perform pg_temp.ok((k ->> 'ingresos')::numeric = 0, 'Sin pagos todavia, los ingresos van en cero');
+  perform pg_temp.ok((k ->> 'atendidas_sin_cobrar')::int = (k ->> 'atendidas')::int,
+    'Todas las atendidas arrancan sin cobrar');
+
+  -- Se registra un pago ligado a una cita atendida
+  select c.id, c.paciente_id into v_cita, v_pac
+  from public.citas c where c.estado = 'atendida' limit 1;
+
+  insert into public.pagos (paciente_id, cita_id, monto, metodo, estado, descripcion, registrado_por)
+  values (v_pac, v_cita, 175.00, 'efectivo', 'pagado', 'Sesion de terapia manual',
+          '22222222-2222-2222-2222-222222222222');
+  insert into public.pagos (paciente_id, monto, metodo, estado, descripcion, registrado_por)
+  values (v_pac, 100.00, 'tarjeta', 'pagado', 'Abono suelto',
+          '22222222-2222-2222-2222-222222222222');
+
+  k := public.kpis_resumen(current_date - 60, current_date + 60);
+  perform pg_temp.ok((k ->> 'ingresos')::numeric = 275.00, 'Suma los ingresos del periodo');
+  perform pg_temp.ok((k ->> 'pagos_registrados')::int = 2, 'Cuenta los pagos registrados');
+  perform pg_temp.ok((k ->> 'atendidas_cobradas')::int = 1,
+    'Marca como cobrada la cita que tiene el pago ligado');
+  perform pg_temp.ok(
+    (k -> 'ingresos_por_metodo' ->> 'efectivo')::numeric = 175.00
+    and (k -> 'ingresos_por_metodo' ->> 'tarjeta')::numeric = 100.00,
+    'Desglosa los ingresos por metodo de pago');
+  perform pg_temp.ok((k ->> 'ticket_promedio')::numeric = 137.50, 'Calcula el ticket promedio');
+  perform pg_temp.ok((k ->> 'tasa_cobro')::numeric is not null, 'Calcula la tasa de cobro');
+
+  -- Un pago anulado no cuenta
+  update public.pagos set estado = 'anulado', anulado_en = now(), motivo_anulacion = 'prueba'
+   where cita_id = v_cita;
+  k := public.kpis_resumen(current_date - 60, current_date + 60);
+  perform pg_temp.ok((k ->> 'ingresos')::numeric = 100.00, 'Un pago anulado deja de sumar');
+  perform pg_temp.ok((k ->> 'atendidas_cobradas')::int = 0,
+    'Y la cita vuelve a contar como no cobrada');
+
+  -- Serie temporal
+  select count(*) into n from public.kpis_serie(current_date - 6, current_date, 'day');
+  perform pg_temp.ok(n = 7, format('La serie diaria devuelve un punto por dia (%s)', n));
+  perform pg_temp.ok(
+    (select count(*) from public.kpis_serie(current_date - 6, current_date, 'day')
+      where ingresos = 0) >= 1,
+    'Incluye los periodos vacios en vez de dejar huecos');
+  perform pg_temp.ok(
+    (select count(*) from public.kpis_serie(current_date - 60, current_date, 'month')) between 2 and 4,
+    'La granularidad mensual agrupa de verdad');
+  perform pg_temp.ok(
+    (select count(*) from public.kpis_serie(current_date - 60, current_date, 'inventado')) > 0,
+    'Una granularidad invalida cae a diaria en vez de reventar');
+
+  -- Lista accionable de lo no cobrado
+  select count(*) into n from public.kpis_sin_cobrar(current_date - 60, current_date + 60);
+  perform pg_temp.ok(n >= 1, 'Lista las visitas atendidas sin cobrar');
+  perform pg_temp.ok(
+    (select paciente is not null and codigo_referencia is not null
+       from public.kpis_sin_cobrar(current_date - 60, current_date + 60) limit 1),
+    'La lista trae con quien resolverlo');
+  perform pg_temp.ok(
+    (select bool_and(dpi_mascara like '%*%')
+       from public.kpis_sin_cobrar(current_date - 60, current_date + 60)),
+    'Y el DPI sigue enmascarado tambien aqui');
+end $$;
+
+\echo ''
+\echo '== 20. Atender pacientes no depende del rol =='
+do $$
+declare v_sol jsonb; v_cita uuid; r jsonb;
+  c_super constant uuid := '11111111-1111-1111-1111-111111111111';
+  c_admin constant uuid := '22222222-2222-2222-2222-222222222222';
+  c_recep constant uuid := '33333333-3333-3333-3333-333333333333';
+  c_fisio constant uuid := '44444444-4444-4444-4444-444444444444';
+begin
+  -- Punto de partida de las pruebas: solo los fisioterapeutas atienden
+  perform pg_temp.ok((select atiende from public.perfiles where id = c_fisio),
+    'El fisioterapeuta atiende por definicion del rol');
+  perform pg_temp.ok(not (select atiende from public.perfiles where id = c_recep),
+    'Recepcion no atiende');
+  perform pg_temp.ok(not public.puede_atender(c_super),
+    'Sin marcar, el superadministrador no aparece como quien atiende');
+
+  perform set_config('neoterapia.test_uid', c_super::text, true);
+  v_sol := public.solicitar_cita(jsonb_build_object(
+    'dpi', '1834571100901', 'nombre_completo', 'Paciente Del Dueno',
+    'telefono', '4444-7777', 'fecha', (current_date + 34)::text,
+    'acepta_politica', true,
+    'areas', jsonb_build_array(jsonb_build_object('codigo', 'hombro_der', 'intensidad', 6))));
+  select id into v_cita from public.citas where codigo_referencia = v_sol ->> 'codigo_referencia';
+  perform public.confirmar_cita(v_cita, now() + interval '34 days');
+
+  -- Antes de marcarse: ni se le asigna, ni se auto-asigna al atender
+  r := public.asignar_fisioterapeuta(v_cita, c_super);
+  perform pg_temp.ok((r ->> 'error') = 'no_atiende',
+    'No se asigna a quien no esta marcado como que atiende');
+  r := public.marcar_asistencia(v_cita, true);
+  perform pg_temp.ok((r ->> 'error') = 'falta_fisioterapeuta',
+    'Y tampoco queda el como autor de la nota por marcar la asistencia');
+
+  -- El superadministrador se marca a si mismo
+  update public.perfiles set atiende = true where id = c_super;
+  perform pg_temp.ok(public.puede_atender(c_super), 'Ya figura como quien atiende');
+  perform pg_temp.ok(public.atiendo(), 'Y se reconoce a si mismo');
+  perform pg_temp.ok(
+    (select bool_and(id in (select id from public.perfiles where atiende and activo))
+       from public.perfiles where id in (c_super, c_fisio)),
+    'La agenda ahora lo ofrece a el junto a los fisioterapeutas');
+
+  -- Ahora si atiende
+  r := public.marcar_asistencia(v_cita, true);
+  perform pg_temp.ok((r ->> 'ok')::boolean,
+    'El superadministrador que atiende cierra la cita como atendida');
+  perform pg_temp.ok(
+    (select fisioterapeuta_id = c_super from public.citas where id = v_cita),
+    'La cita queda a su nombre');
+  perform pg_temp.ok(
+    (select fisioterapeuta_id = c_super from public.sesiones where cita_id = v_cita),
+    'Y la nota clinica tambien: tiene autor');
+  r := public.firmar_sesion((select id from public.sesiones where cita_id = v_cita));
+  perform pg_temp.ok((r ->> 'ok')::boolean, 'Puede firmar la nota que el mismo escribio');
+  perform pg_temp.ok(public.puedo_ver_clinico(
+      (select paciente_id from public.citas where id = v_cita)),
+    'Y ve el expediente de ese paciente');
+
+  -- El rol sigue mandando en los extremos
+  update public.perfiles set atiende = false where id = c_fisio;
+  perform pg_temp.ok((select atiende from public.perfiles where id = c_fisio),
+    'A un fisioterapeuta no se le puede quitar: es su rol');
+  update public.perfiles set atiende = true where id = c_recep;
+  perform pg_temp.ok(not (select atiende from public.perfiles where id = c_recep),
+    'A recepcion no se le puede poner: no ve lo clinico');
+
+  -- Solo el superadministrador reparte esa capacidad
+  perform set_config('neoterapia.test_uid', c_admin::text, true);
+  begin
+    update public.perfiles set atiende = true where id = c_admin;
+    perform pg_temp.ok(false, 'Un admin NO deberia poder auto-asignarse consulta');
+  exception when insufficient_privilege then
+    perform pg_temp.ok(true, 'Un administrador no se marca a si mismo: lo hace el superadmin');
+  end;
+
+  -- Alta de personal con la casilla marcada
+  perform set_config('neoterapia.test_uid', c_super::text, true);
+  r := public.crear_usuario_personal(
+    'dueno2@neoterapia.gt', 'unaClaveLarga1', 'Segundo Dueno', 'admin',
+    null, null, null, '#7c3aed', true);
+  perform pg_temp.ok((r ->> 'ok')::boolean, 'Se da de alta un administrador que atiende');
+  perform pg_temp.ok((r ->> 'atiende')::boolean, 'La respuesta confirma que atendera');
+  perform pg_temp.ok(public.puede_atender((r ->> 'usuario_id')::uuid),
+    'Y entra directo a la lista de quien puede atender');
+
+  r := public.crear_usuario_personal(
+    'recep2@neoterapia.gt', 'unaClaveLarga1', 'Segunda Recepcion', 'recepcion',
+    null, null, null, null, true);
+  perform pg_temp.ok(not public.puede_atender((r ->> 'usuario_id')::uuid),
+    'Marcar la casilla en un usuario de recepcion no lo convierte en clinico');
+end $$;
+
+\echo ''
 \echo '================= TODAS LAS PRUEBAS PASARON ================='

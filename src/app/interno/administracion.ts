@@ -114,15 +114,29 @@ const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', '
       <!-- ---------- Usuarios ---------- -->
       @if (seccion() === 'usuarios' && !cargando()) {
         <div class="tarjeta overflow-hidden">
+          <header class="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 class="font-semibold">Personal de la clínica</h2>
+              <p class="text-sm text-slate-500 mt-0.5">
+                Los únicos usuarios con sesión. Los pacientes no aparecen aquí.
+              </p>
+            </div>
+            @if (auth.esSuperadmin()) {
+              <button type="button" class="btn-primario btn-sm" (click)="abrirNuevoUsuario()">
+                Crear usuario
+              </button>
+            }
+          </header>
           <table class="tabla">
-            <thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th><th>Colegiado</th><th>Estado</th><th></th></tr></thead>
+            <thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th><th>Atiende</th><th>Colegiado</th><th>Estado</th><th></th></tr></thead>
             <tbody>
               @for (p of personal(); track p.id) {
                 <tr>
                   <td>
                     <span class="font-medium">{{ p.nombre_completo }}</span>
-                    @if (p.rol === 'fisioterapeuta') {
+                    @if (p.atiende) {
                       <span class="inline-block w-2.5 h-2.5 rounded-full ml-2 align-middle"
+                            title="Color en la agenda"
                             [style.background]="p.color_agenda"></span>
                     }
                   </td>
@@ -137,6 +151,21 @@ const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', '
                       <span class="chip-neutro">{{ etiquetaRol(p.rol) }}</span>
                     }
                   </td>
+                  <td>
+                    @if (auth.esSuperadmin() && p.rol !== 'fisioterapeuta' && p.rol !== 'recepcion') {
+                      <label class="inline-flex items-center gap-2 text-sm cursor-pointer">
+                        <input type="checkbox" class="w-4 h-4 accent-teal-700"
+                               [attr.id]="'at-' + p.id"
+                               [checked]="p.atiende"
+                               (change)="alternarAtiende(p, $any($event.target).checked)">
+                        <span class="text-slate-600">{{ p.atiende ? 'Sí' : 'No' }}</span>
+                      </label>
+                    } @else {
+                      <span class="text-sm" [class]="p.atiende ? 'text-slate-700' : 'text-slate-400'">
+                        {{ p.atiende ? 'Sí' : 'No' }}
+                      </span>
+                    }
+                  </td>
                   <td class="text-sm">{{ p.colegiado ?? '—' }}</td>
                   <td>
                     <span class="chip" [class]="p.activo
@@ -145,8 +174,11 @@ const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', '
                       {{ p.activo ? 'Activo' : 'Inactivo' }}
                     </span>
                   </td>
-                  <td class="text-right">
+                  <td class="text-right whitespace-nowrap">
                     @if (auth.esSuperadmin() && p.id !== auth.perfil()?.id) {
+                      <button type="button" class="btn-fantasma btn-sm" (click)="abrirClave(p)">
+                        Contraseña
+                      </button>
                       <button type="button" class="btn-fantasma btn-sm" (click)="alternarActivo(p)">
                         {{ p.activo ? 'Desactivar' : 'Activar' }}
                       </button>
@@ -157,8 +189,12 @@ const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', '
             </tbody>
           </table>
           <p class="px-5 py-3 text-xs text-slate-500 bg-slate-50 border-t border-slate-100">
-            Los usuarios se crean desde Supabase (Authentication → Users) y luego se les asigna un
-            perfil aquí. Los pacientes nunca aparecen en esta lista: no tienen cuenta.
+            El usuario queda con el correo confirmado y puede entrar de inmediato: lo dio de alta
+            un superadministrador, no es un auto-registro que haya que verificar.
+            <br>
+            <strong>Atiende</strong> es independiente del rol: quien la tiene marcada aparece en la
+            agenda, se le pueden asignar citas y firma notas clínicas. El fisioterapeuta la tiene
+            siempre; recepción nunca, porque no ve información clínica.
           </p>
         </div>
       }
@@ -167,12 +203,17 @@ const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', '
       @if (seccion() === 'tratamientos' && !cargando()) {
         <div class="tarjeta overflow-hidden">
           <header class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
-            <h2 class="font-semibold">Catálogo de tratamientos</h2>
+            <div>
+              <h2 class="font-semibold">Catálogo de tratamientos</h2>
+              <p class="text-sm text-slate-500 mt-0.5">
+                Sin precio: el monto se escribe al aplicarlo en la sesión, porque varía por caso.
+              </p>
+            </div>
             <button type="button" class="btn-secundario btn-sm" (click)="abrirTratamiento(null)">Nuevo</button>
           </header>
           <table class="tabla">
             <thead><tr><th>Código</th><th>Nombre</th><th class="text-right">Duración</th>
-              <th class="text-right">Precio</th><th>Estado</th><th></th></tr></thead>
+              <th>Nota obligatoria</th><th>Estado</th><th></th></tr></thead>
             <tbody>
               @for (t of tratamientos(); track t.id) {
                 <tr [class.opacity-50]="!t.activo">
@@ -182,7 +223,7 @@ const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', '
                     @if (t.descripcion) { <p class="text-xs text-slate-500">{{ t.descripcion }}</p> }
                   </td>
                   <td class="text-right tabular-nums">{{ t.duracion_min }} min</td>
-                  <td class="text-right tabular-nums">{{ dinero(t.precio) }}</td>
+                  <td class="text-sm text-slate-500">{{ t.requiere_nota ? 'Sí' : '—' }}</td>
                   <td><span class="chip-neutro">{{ t.activo ? 'Activo' : 'Inactivo' }}</span></td>
                   <td class="text-right">
                     <button type="button" class="btn-fantasma btn-sm"
@@ -315,6 +356,178 @@ const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', '
       }
     </div>
 
+    <!-- ============ Crear usuario ============ -->
+    <app-dialogo [(abierto)]="dlgUsuario" titulo="Crear usuario del personal"
+                 subtitulo="Queda listo para entrar, sin correo de confirmación" ancho="lg">
+      <div class="space-y-4">
+        <div class="grid gap-4 sm:grid-cols-2">
+          <div class="sm:col-span-2">
+            <label class="etiqueta" for="u-nom">Nombre completo</label>
+            <input id="u-nom" class="campo" autocomplete="off" placeholder="Nombre y apellido"
+                   [value]="uNombre()" (input)="uNombre.set($any($event.target).value)">
+          </div>
+
+          <div>
+            <label class="etiqueta" for="u-mail">Correo</label>
+            <input id="u-mail" class="campo" type="email" autocomplete="off"
+                   [class.campo-error]="uEmail() !== '' && !uEmailOk()"
+                   [value]="uEmail()" (input)="uEmail.set($any($event.target).value)">
+            @if (uEmail() !== '' && !uEmailOk()) {
+              <p class="error-texto">Revise el formato del correo.</p>
+            }
+          </div>
+
+          <div>
+            <label class="etiqueta" for="u-rol">Rol</label>
+            <select id="u-rol" class="campo" [value]="uRol()"
+                    (change)="cambiarRolNuevo($any($event.target).value)">
+              @for (r of roles; track r) { <option [value]="r">{{ etiquetaRol(r) }}</option> }
+            </select>
+            <p class="ayuda">{{ descripcionRol() }}</p>
+          </div>
+
+          <div>
+            <label class="etiqueta" for="u-cl1">Contraseña</label>
+            <div class="flex gap-2">
+              <input id="u-cl1" class="campo" [type]="verClave() ? 'text' : 'password'"
+                     autocomplete="new-password"
+                     [class.campo-error]="uClave() !== '' && uClave().length < 10"
+                     [value]="uClave()" (input)="uClave.set($any($event.target).value)">
+              <button type="button" class="btn-secundario btn-sm shrink-0"
+                      (click)="verClave.set(!verClave())">{{ verClave() ? 'Ocultar' : 'Ver' }}</button>
+            </div>
+            <p class="ayuda">Mínimo 10 caracteres.</p>
+          </div>
+
+          <div>
+            <label class="etiqueta" for="u-cl2">Repetir contraseña</label>
+            <input id="u-cl2" class="campo" [type]="verClave() ? 'text' : 'password'"
+                   autocomplete="new-password"
+                   [class.campo-error]="uClave2() !== '' && uClave() !== uClave2()"
+                   [value]="uClave2()" (input)="uClave2.set($any($event.target).value)">
+            @if (uClave2() !== '' && uClave() !== uClave2()) {
+              <p class="error-texto">No coinciden.</p>
+            }
+          </div>
+
+          <div>
+            <label class="etiqueta" for="u-tel">Teléfono</label>
+            <input id="u-tel" class="campo" [value]="uTelefono()"
+                   (input)="uTelefono.set($any($event.target).value)">
+          </div>
+
+          @if (uRol() !== 'recepcion') {
+            <div class="sm:col-span-2">
+              <label class="flex items-start gap-3 rounded-lg ring-1 ring-slate-200 px-3 py-2.5 cursor-pointer"
+                     [class]="uAtiende() ? 'bg-teal-50 ring-teal-200' : 'bg-white'">
+                <input id="u-atiende" type="checkbox" class="w-4 h-4 mt-0.5 accent-teal-700"
+                       [checked]="uAtiende()"
+                       [disabled]="uRol() === 'fisioterapeuta'"
+                       (change)="uAtiende.set($any($event.target).checked)">
+                <span class="text-sm">
+                  <strong>Atiende pacientes</strong>
+                  <span class="block text-slate-600 mt-0.5">
+                    @if (uRol() === 'fisioterapeuta') {
+                      Un fisioterapeuta siempre atiende.
+                    } @else {
+                      Aparece en la agenda, se le pueden asignar citas y firma notas clínicas,
+                      además de sus permisos de administración.
+                    }
+                  </span>
+                </span>
+              </label>
+            </div>
+          }
+
+          @if (uAtiende()) {
+            <div>
+              <label class="etiqueta" for="u-col">Colegiado</label>
+              <input id="u-col" class="campo" [value]="uColegiado()"
+                     (input)="uColegiado.set($any($event.target).value)">
+            </div>
+            <div>
+              <label class="etiqueta" for="u-esp">Especialidad</label>
+              <input id="u-esp" class="campo" placeholder="Ej. deportiva, neurológica"
+                     [value]="uEspecialidad()" (input)="uEspecialidad.set($any($event.target).value)">
+            </div>
+            <div>
+              <span class="etiqueta">Color en la agenda</span>
+              <div class="flex flex-wrap gap-2">
+                @for (c of colores; track c) {
+                  <button type="button" class="w-8 h-8 rounded-full ring-2 transition-transform"
+                          [style.background]="c"
+                          [class]="uColor() === c ? 'ring-slate-900 scale-110' : 'ring-transparent'"
+                          [attr.aria-label]="'Color ' + c"
+                          (click)="uColor.set(c)"></button>
+                }
+              </div>
+            </div>
+          }
+        </div>
+
+        <button type="button" class="btn-secundario btn-sm" (click)="generarClave()">
+          Generar contraseña segura
+        </button>
+
+        @if (errorUsuario()) {
+          <p class="rounded-lg bg-rose-50 ring-1 ring-rose-200 px-3 py-2 text-sm text-rose-800">
+            {{ errorUsuario() }}
+          </p>
+        }
+
+        <p class="rounded-lg bg-slate-50 ring-1 ring-slate-200 px-3 py-2.5 text-xs text-slate-600">
+          Anote la contraseña antes de guardar: no se puede volver a consultar, solo
+          restablecer. Pídale a la persona que la cambie en su primer ingreso desde
+          <strong>Contraseña</strong>, en el menú lateral.
+        </p>
+      </div>
+
+      <div acciones class="flex justify-end gap-2">
+        <button type="button" class="btn-secundario" (click)="dlgUsuario.set(false)">Cancelar</button>
+        <button type="button" class="btn-primario" [disabled]="!usuarioValido() || guardando()"
+                (click)="guardarUsuario()">
+          {{ guardando() ? 'Creando…' : 'Crear usuario' }}
+        </button>
+      </div>
+    </app-dialogo>
+
+    <!-- ============ Restablecer contraseña ============ -->
+    <app-dialogo [(abierto)]="dlgClave" titulo="Restablecer contraseña"
+                 [subtitulo]="usuarioClave()?.nombre_completo ?? ''">
+      <div class="space-y-4">
+        <p class="text-sm text-slate-600">
+          La contraseña anterior deja de servir de inmediato. Entréguesela a la persona por
+          un medio seguro y pídale que la cambie al entrar.
+        </p>
+        <div>
+          <label class="etiqueta" for="rc-1">Nueva contraseña</label>
+          <div class="flex gap-2">
+            <input id="rc-1" class="campo" [type]="verClave() ? 'text' : 'password'"
+                   autocomplete="new-password"
+                   [value]="rcClave()" (input)="rcClave.set($any($event.target).value)">
+            <button type="button" class="btn-secundario btn-sm shrink-0"
+                    (click)="verClave.set(!verClave())">{{ verClave() ? 'Ocultar' : 'Ver' }}</button>
+          </div>
+          <p class="ayuda">Mínimo 10 caracteres.</p>
+        </div>
+        <button type="button" class="btn-secundario btn-sm" (click)="rcClave.set(claveAleatoria())">
+          Generar contraseña segura
+        </button>
+        @if (errorClave()) {
+          <p class="rounded-lg bg-rose-50 ring-1 ring-rose-200 px-3 py-2 text-sm text-rose-800">
+            {{ errorClave() }}
+          </p>
+        }
+      </div>
+      <div acciones class="flex justify-end gap-2">
+        <button type="button" class="btn-secundario" (click)="dlgClave.set(false)">Cancelar</button>
+        <button type="button" class="btn-primario"
+                [disabled]="rcClave().length < 10 || guardando()" (click)="guardarClave()">
+          {{ guardando() ? 'Guardando…' : 'Restablecer' }}
+        </button>
+      </div>
+    </app-dialogo>
+
     <app-dialogo [(abierto)]="dlgTratamiento" [titulo]="tratEdit()['id'] ? 'Editar tratamiento' : 'Nuevo tratamiento'">
       <div class="grid gap-4 sm:grid-cols-2">
         <div>
@@ -339,12 +552,12 @@ const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', '
                  [value]="tratEdit()['duracion_min'] ?? 30"
                  (input)="setTrat('duracion_min', +$any($event.target).value)">
         </div>
-        <div>
-          <label class="etiqueta" for="t-pre">Precio (GTQ)</label>
-          <input id="t-pre" class="campo" type="number" min="0" step="0.01"
-                 [value]="tratEdit()['precio'] ?? 0"
-                 (input)="setTrat('precio', +$any($event.target).value)">
-        </div>
+        <label class="flex items-center gap-2 text-sm">
+          <input type="checkbox" class="rounded border-slate-300 text-marca-600"
+                 [checked]="tratEdit()['requiere_nota'] === true"
+                 (change)="setTrat('requiere_nota', $any($event.target).checked)">
+          Exige nota clínica
+        </label>
         <label class="sm:col-span-2 flex items-center gap-2 text-sm">
           <input type="checkbox" class="rounded border-slate-300 text-marca-600"
                  [checked]="tratEdit()['activo'] !== false"
@@ -433,7 +646,8 @@ export class Administracion {
 
   readonly duplicados = signal<Duplicado[]>([]);
   readonly personal = signal<Perfil[]>([]);
-  readonly fisios = computed(() => this.personal().filter((p) => p.rol === 'fisioterapeuta' && p.activo));
+  /** Quien atiende, sin importar el rol: el superadministrador también pasa consulta. */
+  readonly fisios = computed(() => this.personal().filter((p) => p.atiende && p.activo));
   readonly tratamientos = signal<Tratamiento[]>([]);
   readonly horarios = signal<any[]>([]);
   readonly auditoria = signal<RegistroAuditoria[]>([]);
@@ -442,6 +656,27 @@ export class Administracion {
 
   readonly conservar = signal<Record<string, string | undefined>>({});
   readonly motivos = signal<Record<string, string | undefined>>({});
+
+  // --- Alta de usuarios ---------------------------------------------------
+  readonly colores = ['#0d9488', '#7c3aed', '#db2777', '#ea580c', '#2563eb', '#65a30d'];
+  readonly dlgUsuario = signal(false);
+  readonly verClave = signal(false);
+  readonly errorUsuario = signal('');
+  readonly uNombre = signal('');
+  readonly uEmail = signal('');
+  readonly uClave = signal('');
+  readonly uClave2 = signal('');
+  readonly uRol = signal<RolUsuario>('recepcion');
+  readonly uTelefono = signal('');
+  readonly uColegiado = signal('');
+  readonly uEspecialidad = signal('');
+  readonly uColor = signal('#0d9488');
+  readonly uAtiende = signal(false);
+
+  readonly dlgClave = signal(false);
+  readonly usuarioClave = signal<Perfil | null>(null);
+  readonly rcClave = signal('');
+  readonly errorClave = signal('');
 
   readonly dlgTratamiento = signal(false);
   readonly tratEdit = signal<Record<string, unknown>>({});
@@ -567,6 +802,128 @@ export class Administracion {
 
   // --- Usuarios -----------------------------------------------------------
 
+  readonly uEmailOk = computed(() => /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(this.uEmail().trim()));
+
+  readonly usuarioValido = computed(() =>
+    this.uEmailOk()
+    && this.uNombre().trim().split(/\s+/).length >= 2
+    && this.uNombre().trim().length >= 5
+    && this.uClave().length >= 10
+    && this.uClave() === this.uClave2(),
+  );
+
+  readonly descripcionRol = computed(() => ({
+    superadmin: 'Control total, incluye gestión de usuarios y configuración.',
+    admin: 'Todo salvo crear usuarios y cambiar roles.',
+    recepcion: 'Coordina citas y pagos. No ve notas clínicas ni antecedentes.',
+    fisioterapeuta: 'Ve el expediente clínico solo de los pacientes que atiende.',
+  } as Record<RolUsuario, string>)[this.uRol()]);
+
+  /** Contraseña legible pero fuerte, sin caracteres que se confundan al dictar. */
+  claveAleatoria(): string {
+    const abc = 'abcdefghijkmnopqrstuvwxyz';
+    const ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const num = '23456789';
+    const sig = '!@#$%&*';
+    const todo = abc + ABC + num + sig;
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    // Se garantiza al menos uno de cada tipo.
+    const base = [
+      ABC[bytes[0] % ABC.length],
+      abc[bytes[1] % abc.length],
+      num[bytes[2] % num.length],
+      sig[bytes[3] % sig.length],
+    ];
+    for (let i = 4; i < 14; i++) base.push(todo[bytes[i] % todo.length]);
+    return base.join('');
+  }
+
+  generarClave() {
+    const c = this.claveAleatoria();
+    this.uClave.set(c);
+    this.uClave2.set(c);
+    this.verClave.set(true);
+  }
+
+  abrirNuevoUsuario() {
+    this.uNombre.set(''); this.uEmail.set(''); this.uClave.set(''); this.uClave2.set('');
+    this.uRol.set('recepcion'); this.uTelefono.set(''); this.uColegiado.set('');
+    this.uEspecialidad.set(''); this.uColor.set('#0d9488'); this.uAtiende.set(false);
+    this.verClave.set(false); this.errorUsuario.set('');
+    this.dlgUsuario.set(true);
+  }
+
+  /** El rol arrastra la marca de atender en los dos extremos: fisio sí, recepción no. */
+  cambiarRolNuevo(rol: RolUsuario) {
+    this.uRol.set(rol);
+    if (rol === 'fisioterapeuta') this.uAtiende.set(true);
+    else if (rol === 'recepcion') this.uAtiende.set(false);
+  }
+
+  async guardarUsuario() {
+    if (!this.usuarioValido()) return;
+    this.guardando.set(true);
+    this.errorUsuario.set('');
+    try {
+      const r = await this.catalogos.crearUsuario({
+        email: this.uEmail().trim(),
+        clave: this.uClave(),
+        nombre: this.uNombre().trim(),
+        rol: this.uRol(),
+        telefono: this.uTelefono().trim() || null,
+        colegiado: this.uColegiado().trim() || null,
+        especialidad: this.uEspecialidad().trim() || null,
+        color: this.uAtiende() ? this.uColor() : null,
+        atiende: this.uAtiende(),
+      });
+
+      if (!r.ok) {
+        this.errorUsuario.set(r.mensaje ?? 'No se pudo crear el usuario.');
+        return;
+      }
+      this.avisos.exito(`Usuario ${this.uEmail().trim()} creado. Ya puede iniciar sesión.`);
+      this.dlgUsuario.set(false);
+      await this.cargar();
+    } catch (e) {
+      this.errorUsuario.set(
+        e instanceof Error && /insufficient|permission/i.test(e.message)
+          ? 'Solo un superadministrador puede crear usuarios.'
+          : 'No se pudo crear el usuario.',
+      );
+      console.error(e);
+    } finally {
+      this.guardando.set(false);
+    }
+  }
+
+  abrirClave(p: Perfil) {
+    this.usuarioClave.set(p);
+    this.rcClave.set('');
+    this.errorClave.set('');
+    this.verClave.set(false);
+    this.dlgClave.set(true);
+  }
+
+  async guardarClave() {
+    const p = this.usuarioClave();
+    if (!p || this.rcClave().length < 10) return;
+    this.guardando.set(true);
+    this.errorClave.set('');
+    try {
+      const r = await this.catalogos.restablecerContrasena(p.id, this.rcClave());
+      if (!r.ok) {
+        this.errorClave.set(r.mensaje ?? 'No se pudo restablecer la contraseña.');
+        return;
+      }
+      this.avisos.exito(`Contraseña de ${p.nombre_completo} restablecida.`);
+      this.dlgClave.set(false);
+    } catch {
+      this.errorClave.set('Solo un superadministrador puede restablecer contraseñas.');
+    } finally {
+      this.guardando.set(false);
+    }
+  }
+
   async cambiarRol(p: Perfil, rol: RolUsuario) {
     try {
       const { error } = await this.sb.desde('perfiles').update({ rol }).eq('id', p.id);
@@ -589,10 +946,27 @@ export class Administracion {
     }
   }
 
+  /**
+   * Marca o desmarca que esa persona pasa consulta. Al desmarcarla deja de
+   * aparecer en la agenda, pero las citas y notas que ya firmó no se tocan.
+   */
+  async alternarAtiende(p: Perfil, atiende: boolean) {
+    try {
+      await this.catalogos.marcarAtiende(p.id, atiende);
+      this.avisos.exito(atiende
+        ? `${p.nombre_completo} ya puede atender pacientes.`
+        : `${p.nombre_completo} deja de aparecer en la agenda.`);
+      await this.cargar();
+    } catch {
+      this.avisos.error('Solo un superadministrador define quién atiende pacientes.');
+      await this.cargar();
+    }
+  }
+
   // --- Tratamientos -------------------------------------------------------
 
   abrirTratamiento(t: Tratamiento | null) {
-    this.tratEdit.set(t ? { ...t } : { duracion_min: 30, precio: 0, activo: true });
+    this.tratEdit.set(t ? { ...t } : { duracion_min: 30, activo: true, requiere_nota: false });
     this.dlgTratamiento.set(true);
   }
 

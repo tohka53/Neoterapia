@@ -101,22 +101,23 @@ on conflict (codigo) do nothing;
 -- ----------------------------------------------------------------------------
 -- Tratamientos
 -- ----------------------------------------------------------------------------
+-- Sin precio a proposito: varia por caso y se escribe al aplicarlo en la sesion.
 
-insert into public.tratamientos (codigo, nombre, descripcion, duracion_min, precio, requiere_nota) values
-  ('EVAL',   'Evaluacion inicial',        'Valoracion completa, historia clinica y plan de tratamiento', 60, 200.00, true),
-  ('TMAN',   'Terapia manual',            'Movilizacion articular y tecnicas de tejido blando',          45, 175.00, false),
-  ('MASO',   'Masaje descontracturante',  'Masaje terapeutico profundo',                                40, 150.00, false),
-  ('ELEC',   'Electroterapia',            'TENS / corrientes analgesicas',                              20,  75.00, false),
-  ('ULTR',   'Ultrasonido terapeutico',   'Ultrasonido para tejidos profundos',                         15,  70.00, false),
-  ('LASE',   'Laserterapia',              'Laser de baja potencia',                                     15,  90.00, false),
-  ('PSEC',   'Puncion seca',              'Tratamiento de puntos gatillo miofasciales',                 30, 200.00, true),
-  ('EJER',   'Ejercicio terapeutico',     'Programa supervisado de fortalecimiento y movilidad',        45, 160.00, false),
-  ('VNM',    'Vendaje neuromuscular',     'Aplicacion de kinesiotape',                                  15,  80.00, false),
-  ('CRIO',   'Crioterapia',               'Aplicacion de frio local',                                   15,  50.00, false),
-  ('TERM',   'Termoterapia',              'Compresas humedo-calientes / parafina',                      15,  50.00, false),
-  ('TRAC',   'Traccion',                  'Traccion cervical o lumbar',                                 20, 110.00, false),
-  ('RESP',   'Fisioterapia respiratoria', 'Tecnicas de higiene bronquial y reeducacion respiratoria',   40, 190.00, true),
-  ('DREN',   'Drenaje linfatico',         'Drenaje linfatico manual',                                   50, 210.00, false)
+insert into public.tratamientos (codigo, nombre, descripcion, duracion_min, requiere_nota) values
+  ('EVAL',   'Evaluacion inicial',        'Valoracion completa, historia clinica y plan de tratamiento', 60, true),
+  ('TMAN',   'Terapia manual',            'Movilizacion articular y tecnicas de tejido blando',          45, false),
+  ('MASO',   'Masaje descontracturante',  'Masaje terapeutico profundo',                                40, false),
+  ('ELEC',   'Electroterapia',            'TENS / corrientes analgesicas',                              20, false),
+  ('ULTR',   'Ultrasonido terapeutico',   'Ultrasonido para tejidos profundos',                         15, false),
+  ('LASE',   'Laserterapia',              'Laser de baja potencia',                                     15, false),
+  ('PSEC',   'Puncion seca',              'Tratamiento de puntos gatillo miofasciales',                 30, true),
+  ('EJER',   'Ejercicio terapeutico',     'Programa supervisado de fortalecimiento y movilidad',        45, false),
+  ('VNM',    'Vendaje neuromuscular',     'Aplicacion de kinesiotape',                                  15, false),
+  ('CRIO',   'Crioterapia',               'Aplicacion de frio local',                                   15, false),
+  ('TERM',   'Termoterapia',              'Compresas humedo-calientes / parafina',                      15, false),
+  ('TRAC',   'Traccion',                  'Traccion cervical o lumbar',                                 20, false),
+  ('RESP',   'Fisioterapia respiratoria', 'Tecnicas de higiene bronquial y reeducacion respiratoria',   40, true),
+  ('DREN',   'Drenaje linfatico',         'Drenaje linfatico manual',                                   50, false)
 on conflict (codigo) do nothing;
 
 -- ----------------------------------------------------------------------------
@@ -138,3 +139,27 @@ where not exists (
   select 1 from public.horarios_atencion x
   where x.fisioterapeuta_id is null and x.dia_semana = 6
 );
+
+
+-- ----------------------------------------------------------------------------
+-- Inventario inicial
+-- ----------------------------------------------------------------------------
+-- Existencia en cero: se carga registrando movimientos de entrada, para que la
+-- bitacora cuadre desde el primer dia.
+
+insert into public.inventario_articulos (codigo, nombre, descripcion, categoria, unidad, minimo, ubicacion) values
+  ('INS-ELEC', 'Electrodos autoadhesivos',  'Para TENS / electroestimulacion',      'insumo',      'par',    10, 'Bodega'),
+  ('INS-GEL',  'Gel conductor',             'Para ultrasonido y electroterapia',     'insumo',      'frasco',  4, 'Bodega'),
+  ('INS-KT',   'Kinesiotape',               'Rollo de vendaje neuromuscular',        'insumo',      'rollo',   6, 'Bodega'),
+  ('INS-PAP',  'Papel para camilla',        'Rollo desechable',                      'insumo',      'rollo',   8, 'Bodega'),
+  ('INS-ALG',  'Algodon',                   'Bolsa',                                 'insumo',      'bolsa',   3, 'Bodega'),
+  ('INS-GUA',  'Guantes de nitrilo',        'Caja de 100 unidades',                  'insumo',      'caja',    4, 'Bodega'),
+  ('INS-VEN',  'Venda elastica',            'Venda de compresion',                   'insumo',      'unidad', 10, 'Bodega'),
+  ('INS-PAR',  'Parafina',                  'Bloque para termoterapia',              'insumo',      'kg',      2, 'Bodega'),
+  ('LIM-DES',  'Desinfectante de superficies', 'Galon',                              'limpieza',    'galon',   2, 'Bodega'),
+  ('LIM-ALC',  'Alcohol en gel',            'Dispensador',                           'limpieza',    'litro',   3, 'Recepcion'),
+  ('EQU-TENS', 'Equipo TENS',               'Electroestimulador portatil',           'equipo',      'unidad',  1, 'Consultorio 1'),
+  ('EQU-ULT',  'Equipo de ultrasonido',     'Ultrasonido terapeutico',               'equipo',      'unidad',  1, 'Consultorio 1'),
+  ('EQU-BAN',  'Bandas elasticas',          'Juego de resistencias',                 'equipo',      'juego',   2, 'Gimnasio'),
+  ('PAP-CONS', 'Hojas de consentimiento',   'Formato impreso',                       'papeleria',   'unidad', 25, 'Recepcion')
+on conflict (codigo) do nothing;

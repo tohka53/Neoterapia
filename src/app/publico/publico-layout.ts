@@ -44,6 +44,11 @@ import { environment } from '../../environments/environment';
           <div class="flex flex-col sm:items-end gap-1">
             <a routerLink="/politica-de-datos" class="hover:text-marca-700">Política de tratamiento de datos</a>
             <a routerLink="/acceso" class="text-slate-400 hover:text-slate-600 text-xs">Acceso del personal</a>
+            <p class="text-xs text-slate-400 mt-1">
+              Desarrollado por
+              <a href="https://www.techsolutionsgt.dev/" target="_blank" rel="noopener"
+                 class="font-medium text-slate-500 hover:text-marca-700">TechSolutions GT</a>
+            </p>
           </div>
         </div>
       </footer>

@@ -52,7 +52,7 @@ import { Cargando, EscalaDolor } from '../shared/ui';
           @if (cuando()) {
             <div class="mt-5 rounded-lg bg-slate-50 ring-1 ring-slate-200 px-4 py-3">
               <p class="text-xs uppercase tracking-wide text-slate-400 font-semibold">Su cita</p>
-              <p class="mt-1 text-slate-800 capitalize">{{ cuando() }}</p>
+              <p class="mt-1 text-slate-800 first-letter:uppercase">{{ cuando() }}</p>
               <p class="text-sm text-slate-500 font-mono mt-0.5">{{ codigo() }}</p>
             </div>
           }

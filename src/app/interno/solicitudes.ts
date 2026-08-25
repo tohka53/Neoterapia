@@ -72,7 +72,7 @@ type Pestana = 'pendientes' | 'confirmadas' | 'historial';
 
                 <div class="text-right shrink-0">
                   @if (c.inicio_programado) {
-                    <p class="text-sm font-medium capitalize">{{ fLarga(c.inicio_programado) }}</p>
+                    <p class="text-sm font-medium first-letter:uppercase">{{ fLarga(c.inicio_programado) }}</p>
                     <p class="text-sm text-slate-500">{{ hora(c.inicio_programado) }}</p>
                   } @else {
                     <p class="text-sm font-medium">{{ fCorta(c.fecha_solicitada + 'T12:00:00') }}</p>
@@ -146,7 +146,7 @@ type Pestana = 'pendientes' | 'confirmadas' | 'historial';
               <label class="etiqueta" for="pa">Fisioterapeuta</label>
               <select id="pa" class="campo" [value]="fisioSel()"
                       (change)="cambiarFisio($event)">
-                <option value="">Seleccione…</option>
+                <option value="">Sin asignar (se define después)</option>
                 @for (f of fisios(); track f.id) {
                   <option [value]="f.id">{{ f.nombre_completo }}</option>
                 }
@@ -357,9 +357,9 @@ export class Solicitudes {
   private temporizador?: ReturnType<typeof setTimeout>;
 
   readonly motivoCorto = computed(() => this.nota().trim().length < 3);
-  readonly puedeAgendar = computed(
-    () => !!this.fechaSel() && !!this.horaSel() && !!this.fisioSel(),
-  );
+  // El fisioterapeuta NO es obligatorio: se puede confirmar la hora y asignar
+  // a quien atienda más adelante, desde la agenda.
+  readonly puedeAgendar = computed(() => !!this.fechaSel() && !!this.horaSel());
 
   readonly areasDeCita = computed<AreaMarcada[]>(
     () => (this.seleccion()?.areas ?? []).map((a) => ({ ...a, nivel_dolor: a.intensidad ?? 0 })),
@@ -442,7 +442,7 @@ export class Solicitudes {
     this.nota.set('');
     this.consultorio.set(c.consultorio ?? '');
     this.duracion.set(45);
-    this.fisioSel.set(c.fisioterapeuta_id ?? (this.fisios()[0]?.id ?? ''));
+    this.fisioSel.set(c.fisioterapeuta_id ?? '');
     this.fechaSel.set(c.fecha_solicitada);
     this.horaSel.set(c.hora_solicitada);
     this.dlgAgenda.set(true);
@@ -517,18 +517,20 @@ export class Solicitudes {
 
     try {
       const r = this.modo() === 'confirmar'
-        ? await this.citas.confirmar(c.id, inicio, this.fisioSel(), {
+        ? await this.citas.confirmar(c.id, inicio, this.fisioSel() || null, {
             duracionMin: this.duracion(),
             consultorio: this.consultorio() || null,
             nota: this.nota() || null,
           })
-        : await this.citas.reprogramar(c.id, inicio, this.fisioSel(), this.nota());
+        : await this.citas.reprogramar(c.id, inicio, this.fisioSel() || null, this.nota());
 
       if (!r.ok) {
         this.errorDlg.set(r.mensaje ?? this.textoError(r.error));
         return;
       }
-      this.avisos.exito(this.modo() === 'confirmar' ? 'Cita confirmada.' : 'Cita reprogramada.');
+      this.avisos.exito(
+        (this.modo() === 'confirmar' ? 'Cita confirmada.' : 'Cita reprogramada.')
+        + (this.fisioSel() ? '' : ' Quedó sin fisioterapeuta asignado.'));
       this.dlgAgenda.set(false);
       if (r.enlaces) {
         await this.copiar(
@@ -570,10 +572,14 @@ export class Solicitudes {
   async asistencia(c: CitaListado, asistio: boolean) {
     try {
       const r = await this.citas.marcarAsistencia(c.id, asistio);
-      if (r.ok) {
-        this.avisos.exito(asistio ? 'Marcada como atendida. Ya puede llenar la nota clínica.' : 'Marcada como ausente.');
-        await this.cargar();
+      if (!r.ok) {
+        this.avisos.error(r.mensaje ?? this.textoError(r.error));
+        return;
       }
+      this.avisos.exito(asistio
+        ? 'Marcada como atendida. Ya puede llenar la nota clínica.'
+        : 'Marcada como ausente.');
+      await this.cargar();
     } catch (e) {
       this.avisos.error('No se pudo registrar la asistencia.');
       console.error(e);
@@ -597,6 +603,7 @@ export class Solicitudes {
   private textoError(codigo?: string): string {
     return {
       traslape: 'Ese fisioterapeuta ya tiene una cita confirmada en ese horario.',
+      falta_fisioterapeuta: 'Asigne un fisioterapeuta antes de marcarla como atendida: la nota clínica necesita autor.',
       estado_no_permite: 'La cita ya cambió de estado. Recargue la lista.',
       motivo_requerido: 'Escriba el motivo.',
     }[codigo ?? ''] ?? 'No se pudo completar la operación.';

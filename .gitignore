@@ -44,3 +44,7 @@ Thumbs.db
 
 # Capturas de la verificacion visual
 /capturas
+
+# Paquetes de transferencia y basura local
+*.tar.gz
+/_para_borrar

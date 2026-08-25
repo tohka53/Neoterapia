@@ -1,6 +1,8 @@
 import { Injectable, inject } from '@angular/core';
 import { SupabaseService } from '../supabase.service';
-import { Alerta, Duplicado, PacienteListado, PuntoEvolucion } from '../modelos';
+import {
+  Alerta, Duplicado, MomentoMapa, PacienteListado, PuntoEvolucion,
+} from '../modelos';
 
 @Injectable({ providedIn: 'root' })
 export class PacientesService {
@@ -88,6 +90,13 @@ export class PacientesService {
       .desde('pacientes_clinico')
       .upsert({ paciente_id: pacienteId, ...datos }, { onConflict: 'paciente_id' });
     if (error) throw error;
+  }
+
+  /** Un mapa por momento (solicitud y cada sesión), para recorrer el historial. */
+  async historialMapa(pacienteId: string): Promise<MomentoMapa[]> {
+    return (await this.sb.rpc<MomentoMapa[]>('historial_mapa_corporal', {
+      p_paciente_id: pacienteId,
+    })) ?? [];
   }
 
   async evolucion(pacienteId: string): Promise<PuntoEvolucion[]> {

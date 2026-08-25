@@ -8,10 +8,23 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const RAIZ = '/root/work/neoterapia/dist/neoterapia/browser';
-const AREAS = JSON.parse(fs.readFileSync('/tmp/areas.json', 'utf8'));
-const SALIDA = '/root/work/capturas';
+const RAIZ = new URL('./dist/neoterapia/browser', import.meta.url).pathname;
+const SALIDA = new URL('./capturas', import.meta.url).pathname;
 fs.mkdirSync(SALIDA, { recursive: true });
+
+// El catálogo del mapa corporal se lee del propio seed, para que la prueba no
+// se desincronice del esquema.
+const SEED = fs.readFileSync(new URL('./supabase/seed.sql', import.meta.url), 'utf8');
+const AREAS = [...SEED.matchAll(
+  /\('([a-z0-9_]+)',\s*'([^']+)',\s*'(\w+)',\s*'(\w+)',\s*'(anterior|posterior)',\s*([\d.]+),\s*([\d.]+),\s*(\d+)\)/g,
+)].map((m) => ({
+  codigo: m[1], nombre: m[2], region: m[3], lado: m[4], vista: m[5],
+  svg_x: Number(m[6]), svg_y: Number(m[7]), orden: Number(m[8]),
+}));
+if (AREAS.length < 40) {
+  console.error('No se pudieron leer las areas del seed:', AREAS.length);
+  process.exit(1);
+}
 
 const TIPOS = {
   '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
@@ -41,7 +54,7 @@ const slots = ['08:00', '08:45', '09:30', '10:15', '11:00', '14:00', '14:45', '1
     disponible: h !== '09:30',
   }));
 
-const navegador = await chromium.launch();
+const navegador = await chromium.launch({ executablePath: process.env['CHROMIUM'] || undefined, args: ['--no-sandbox'] });
 const ctx = await navegador.newContext({ viewport: { width: 1280, height: 900 }, locale: 'es-GT' });
 const pagina = await ctx.newPage();
 

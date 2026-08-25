@@ -1,6 +1,6 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { SupabaseService } from '../supabase.service';
-import { AreaCuerpo, Perfil, Slot, Tratamiento } from '../modelos';
+import { AreaCuerpo, Perfil, RolUsuario, Slot, Tratamiento } from '../modelos';
 
 @Injectable({ providedIn: 'root' })
 export class CatalogosService {
@@ -40,15 +40,26 @@ export class CatalogosService {
     })) ?? [];
   }
 
+  /**
+   * Quién puede atender: no se filtra por rol sino por la marca `atiende`.
+   * En una clínica pequeña el superadministrador también pasa consulta, y debe
+   * poder aparecer en la agenda y quedar asignado a una cita.
+   */
   async fisioterapeutas(): Promise<Perfil[]> {
     const { data, error } = await this.sb
       .desde('perfiles')
       .select('*')
-      .eq('rol', 'fisioterapeuta')
+      .eq('atiende', true)
       .eq('activo', true)
       .order('nombre_completo');
     if (error) throw error;
     return (data ?? []) as Perfil[];
+  }
+
+  /** Solo el superadministrador define quién atiende (lo vigila un trigger). */
+  async marcarAtiende(usuarioId: string, atiende: boolean): Promise<void> {
+    const { error } = await this.sb.desde('perfiles').update({ atiende }).eq('id', usuarioId);
+    if (error) throw error;
   }
 
   async personal(): Promise<Perfil[]> {
@@ -56,6 +67,35 @@ export class CatalogosService {
       .desde('perfiles').select('*').order('rol').order('nombre_completo');
     if (error) throw error;
     return (data ?? []) as Perfil[];
+  }
+
+  /**
+   * Alta de personal. Va por RPC y no por la Admin API de Supabase a propósito:
+   * `auth.admin.createUser()` exigiría la service_role key en el navegador.
+   * La función de Postgres valida que quien llama sea superadmin leyendo el JWT.
+   */
+  crearUsuario(datos: {
+    email: string; clave: string; nombre: string; rol: RolUsuario;
+    telefono?: string | null; colegiado?: string | null;
+    especialidad?: string | null; color?: string | null; atiende?: boolean | null;
+  }) {
+    return this.sb.rpc<{ ok: boolean; usuario_id?: string; error?: string; mensaje?: string }>(
+      'crear_usuario_personal', {
+        p_email: datos.email,
+        p_clave: datos.clave,
+        p_nombre: datos.nombre,
+        p_rol: datos.rol,
+        p_telefono: datos.telefono ?? null,
+        p_colegiado: datos.colegiado ?? null,
+        p_especialidad: datos.especialidad ?? null,
+        p_color: datos.color ?? null,
+        p_atiende: datos.atiende ?? null,
+      });
+  }
+
+  restablecerContrasena(usuarioId: string, clave: string) {
+    return this.sb.rpc<{ ok: boolean; email?: string; error?: string; mensaje?: string }>(
+      'restablecer_contrasena', { p_usuario_id: usuarioId, p_clave: clave });
   }
 
   async tratamientos(soloActivos = true): Promise<Tratamiento[]> {

@@ -3,16 +3,13 @@
 -- ----------------------------------------------------------------------------
 --  Pegue TODO este archivo en:  Supabase → SQL Editor → New query → Run
 --
---  Contiene, en orden, las 12 migraciones + los datos base (seed).
+--  Contiene, en orden, las 18 migraciones + los datos base (seed).
 --  Es idempotente: si algo falla a medio camino, corrija y vuelva a correrlo
 --  completo sin problema.
 --
 --  Despues de correrlo faltan solo dos cosas (estan al final del archivo,
 --  comentadas): crear su usuario y ajustar la URL publica.
 -- ============================================================================
-
-
-
 
 
 -- ####################  20260825120000_01_extensiones_tipos.sql  ####################
@@ -143,7 +140,6 @@ do $$ begin
     'fusionar', 'corregir_dpi', 'cambiar_rol', 'exportar', 'acceso_publico'
   );
 exception when duplicate_object then null; end $$;
-
 
 -- ####################  20260825120100_02_funciones_base.sql  ####################
 
@@ -472,7 +468,6 @@ begin
 end;
 $$;
 
-
 -- ####################  20260825120200_03_personal_y_catalogos.sql  ####################
 
 -- ============================================================================
@@ -627,7 +622,6 @@ create table if not exists public.bloqueos_agenda (
 );
 
 create index if not exists ix_bloqueos_rango on public.bloqueos_agenda using gist (tstzrange(inicio, fin));
-
 
 -- ####################  20260825120300_04_pacientes.sql  ####################
 
@@ -792,7 +786,6 @@ create unique index if not exists ux_duplicados_par
 create index if not exists ix_duplicados_pendientes
   on public.posibles_duplicados (puntaje desc, creado_en desc) where estado = 'pendiente';
 
-
 -- ####################  20260825120400_05_citas.sql  ####################
 
 -- ============================================================================
@@ -953,7 +946,6 @@ $$;
 drop trigger if exists tg_citas_estado on public.citas;
 create trigger tg_citas_estado after insert or update on public.citas
   for each row execute function public.tg_citas_registrar_estado();
-
 
 -- ####################  20260825120500_06_clinico.sql  ####################
 
@@ -1153,7 +1145,6 @@ create table if not exists public.evaluaciones (
 
 create index if not exists ix_evaluaciones_paciente on public.evaluaciones (paciente_id, respondida_en desc);
 
-
 -- ####################  20260825120600_07_pagos.sql  ####################
 
 -- ============================================================================
@@ -1251,7 +1242,6 @@ left join lateral (
   from public.pagos pg
   where pg.paciente_id = p.id and pg.estado = 'pagado'
 ) abonos on true;
-
 
 -- ####################  20260825120700_08_auditoria_enlaces_mensajes.sql  ####################
 
@@ -1651,7 +1641,6 @@ $$;
 
 comment on function public.encolar_mensaje(uuid, public.tipo_mensaje, jsonb) is
   'Encola el mensaje ya renderizado. El envio esta desactivado: no hay proveedor conectado todavia.';
-
 
 -- ####################  20260825120800_09_rls.sql  ####################
 
@@ -2184,7 +2173,6 @@ grant select on public.v_saldos_paciente to authenticated;
 alter default privileges in schema public revoke all on tables    from anon, authenticated;
 alter default privileges in schema public revoke all on functions from anon, authenticated;
 alter default privileges in schema public revoke all on sequences from anon, authenticated;
-
 
 -- ####################  20260825120900_10_rpc_publicas.sql  ####################
 
@@ -2798,7 +2786,6 @@ begin
 end;
 $$;
 
-
 -- ####################  20260825121000_11_rpc_internas.sql  ####################
 
 -- ============================================================================
@@ -3015,6 +3002,8 @@ begin
   );
 end;
 $$;
+
+drop function if exists public.confirmar_cita(uuid, timestamptz, uuid, int, text, text);
 
 create or replace function public.confirmar_cita(
   p_cita_id           uuid,
@@ -3623,7 +3612,6 @@ as $$
   where public.es_staff()
 $$;
 
-
 -- ####################  20260825121100_12_vistas_y_privilegios.sql  ####################
 
 -- ============================================================================
@@ -3864,6 +3852,1628 @@ grant execute on function public.enmascarar_dpi(text)                      to au
 -- `hash_token`, `control_intento` y `limpiar_control_solicitudes` quedan sin
 -- GRANT a proposito: solo se invocan desde dentro de otras funciones DEFINER.
 
+-- ####################  20260825121200_13_gestion_usuarios.sql  ####################
+
+-- ============================================================================
+-- NeoTerapia · 13 · Alta y gestion de usuarios del personal desde el panel
+-- ----------------------------------------------------------------------------
+-- Por que una RPC y no la Admin API de Supabase:
+--   `auth.admin.createUser()` exige la service_role key, que JAMAS debe estar
+--   en el cliente Angular. La alternativa seria una Edge Function; mientras no
+--   haya uno desplegado, estas funciones SECURITY DEFINER hacen el trabajo sin
+--   exponer ninguna credencial: el unico permiso lo da el JWT del que llama.
+--
+-- El candado: `es_superadmin()` lee auth.uid() del JWT, que no se puede
+-- falsificar sin el secreto del proyecto. Sin ese rol, la funcion aborta antes
+-- de tocar nada.
+-- ============================================================================
+
+set search_path = public, extensions;
+
+-- La migracion 18 le agrega el parametro `p_atiende`. Si esa version ya existe
+-- (reinstalacion sobre una base ya migrada), hay que quitarla antes: dos
+-- sobrecargas del mismo nombre volverian ambigua cualquier llamada.
+drop function if exists public.crear_usuario_personal(
+  text, text, text, public.rol_usuario, text, text, text, text, boolean);
+
+create or replace function public.crear_usuario_personal(
+  p_email        text,
+  p_clave        text,
+  p_nombre       text,
+  p_rol          public.rol_usuario,
+  p_telefono     text default null,
+  p_colegiado    text default null,
+  p_especialidad text default null,
+  p_color        text default null
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  v_email  text := lower(btrim(coalesce(p_email, '')));
+  v_nombre text := btrim(coalesce(p_nombre, ''));
+  v_id     uuid;
+begin
+  -- ---------- Candado ----------------------------------------------------
+  if not public.es_superadmin() then
+    raise exception 'Solo un superadministrador puede crear usuarios.'
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  -- ---------- Validaciones ------------------------------------------------
+  if v_email !~ '^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$' then
+    return jsonb_build_object('ok', false, 'error', 'correo_invalido',
+      'mensaje', 'El correo no tiene un formato valido.');
+  end if;
+
+  if length(coalesce(p_clave, '')) < 10 then
+    return jsonb_build_object('ok', false, 'error', 'clave_corta',
+      'mensaje', 'La contrasena debe tener al menos 10 caracteres.');
+  end if;
+
+  if length(v_nombre) < 5 or array_length(string_to_array(v_nombre, ' '), 1) < 2 then
+    return jsonb_build_object('ok', false, 'error', 'nombre_invalido',
+      'mensaje', 'Escriba nombre y apellido.');
+  end if;
+
+  if p_color is not null and p_color !~ '^#[0-9a-fA-F]{6}$' then
+    return jsonb_build_object('ok', false, 'error', 'color_invalido',
+      'mensaje', 'El color debe ir en formato #rrggbb.');
+  end if;
+
+  if exists (select 1 from auth.users u where lower(u.email) = v_email) then
+    return jsonb_build_object('ok', false, 'error', 'correo_existente',
+      'mensaje', 'Ya existe un usuario con ese correo.');
+  end if;
+
+  -- ---------- Alta en Auth ------------------------------------------------
+  -- El correo queda confirmado de una vez: lo esta dando de alta un
+  -- superadministrador, no es un auto-registro que haya que verificar.
+  v_id := gen_random_uuid();
+
+  insert into auth.users (
+    instance_id, id, aud, role, email, encrypted_password,
+    email_confirmed_at, raw_app_meta_data, raw_user_meta_data,
+    created_at, updated_at,
+    confirmation_token, recovery_token, email_change, email_change_token_new
+  ) values (
+    '00000000-0000-0000-0000-000000000000', v_id, 'authenticated', 'authenticated',
+    v_email, crypt(p_clave, gen_salt('bf')),
+    now(),
+    '{"provider":"email","providers":["email"]}'::jsonb,
+    jsonb_build_object('nombre_completo', v_nombre),
+    now(), now(), '', '', '', ''
+  );
+
+  insert into auth.identities (
+    id, user_id, provider_id, identity_data, provider,
+    last_sign_in_at, created_at, updated_at
+  ) values (
+    gen_random_uuid(), v_id, v_id::text,
+    jsonb_build_object('sub', v_id::text, 'email', v_email,
+                       'email_verified', true, 'phone_verified', false),
+    'email', now(), now(), now()
+  );
+
+  -- ---------- Perfil ------------------------------------------------------
+  insert into public.perfiles (
+    id, nombre_completo, rol, email, telefono, colegiado, especialidad, color_agenda
+  ) values (
+    v_id, v_nombre, p_rol, v_email,
+    nullif(btrim(coalesce(p_telefono, '')), ''),
+    nullif(btrim(coalesce(p_colegiado, '')), ''),
+    nullif(btrim(coalesce(p_especialidad, '')), ''),
+    coalesce(p_color, '#0d9488')
+  );
+
+  perform public.registrar_auditoria(
+    'cambiar_rol', 'perfiles', v_id::text, null,
+    format('Alta de usuario %s con rol %s', v_email, p_rol),
+    null, jsonb_build_object('email', v_email, 'rol', p_rol));
+
+  return jsonb_build_object('ok', true, 'usuario_id', v_id, 'email', v_email);
+end;
+$$;
+
+comment on function public.crear_usuario_personal is
+  'Alta de personal desde el panel. Solo superadmin. El paciente NUNCA pasa por aqui.';
+
+-- ----------------------------------------------------------------------------
+-- Restablecer la contrasena de otro usuario
+-- ----------------------------------------------------------------------------
+-- Para la propia contrasena esta `/panel/clave`, que usa auth.updateUser().
+-- Esta es para cuando alguien del equipo la olvida y no tiene acceso al correo.
+
+create or replace function public.restablecer_contrasena(
+  p_usuario_id uuid,
+  p_clave      text
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  v_email text;
+begin
+  if not public.es_superadmin() then
+    raise exception 'Solo un superadministrador puede restablecer contrasenas.'
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  if length(coalesce(p_clave, '')) < 10 then
+    return jsonb_build_object('ok', false, 'error', 'clave_corta',
+      'mensaje', 'La contrasena debe tener al menos 10 caracteres.');
+  end if;
+
+  select u.email into v_email from auth.users u where u.id = p_usuario_id;
+  if v_email is null then
+    return jsonb_build_object('ok', false, 'error', 'no_existe');
+  end if;
+
+  update auth.users
+     set encrypted_password = crypt(p_clave, gen_salt('bf')),
+         email_confirmed_at = coalesce(email_confirmed_at, now()),
+         updated_at = now()
+   where id = p_usuario_id;
+
+  perform public.registrar_auditoria(
+    'cambiar_rol', 'perfiles', p_usuario_id::text, null,
+    format('Restablecimiento de contrasena de %s', v_email));
+
+  return jsonb_build_object('ok', true, 'email', v_email);
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Privilegios: nada de esto lo puede llamar `anon`
+-- ----------------------------------------------------------------------------
+revoke execute on function public.crear_usuario_personal(
+  text, text, text, public.rol_usuario, text, text, text, text) from public, anon;
+revoke execute on function public.restablecer_contrasena(uuid, text) from public, anon;
+
+grant execute on function public.crear_usuario_personal(
+  text, text, text, public.rol_usuario, text, text, text, text) to authenticated;
+grant execute on function public.restablecer_contrasena(uuid, text) to authenticated;
+
+-- ####################  20260825121300_14_inventario_y_precios.sql  ####################
+
+-- ============================================================================
+-- NeoTerapia · 14 · Inventario, y el precio fuera del catalogo de tratamientos
+-- ============================================================================
+
+set search_path = public, extensions;
+
+-- ----------------------------------------------------------------------------
+-- 1. El tratamiento deja de tener precio fijo
+-- ----------------------------------------------------------------------------
+-- El costo varia por caso (paciente, convenio, duracion real), asi que el
+-- catalogo ya no lo dicta. `sesion_tratamientos.precio_aplicado` se conserva y
+-- se escribe a mano al aplicarlo: de ahi sigue saliendo el saldo del paciente.
+
+drop trigger if exists tg_sesion_trat_precio on public.sesion_tratamientos;
+drop function if exists public.tg_heredar_precio_tratamiento();
+
+alter table public.tratamientos drop column if exists precio;
+
+comment on column public.sesion_tratamientos.precio_aplicado is
+  'Monto cobrado por ESTA aplicacion. Se escribe en la sesion; el catalogo ya no sugiere precio.';
+
+-- ----------------------------------------------------------------------------
+-- 2. Tipos del inventario
+-- ----------------------------------------------------------------------------
+
+do $$ begin
+  create type public.categoria_articulo as enum (
+    'insumo',      -- electrodos, gel, kinesiotape, algodon
+    'equipo',      -- ultrasonido, TENS, camillas
+    'medicamento', -- topicos, analgesicos de uso en clinica
+    'limpieza',
+    'papeleria',
+    'otro'
+  );
+exception when duplicate_object then null; end $$;
+
+do $$ begin
+  create type public.tipo_movimiento as enum (
+    'entrada',   -- compra, donacion, devolucion  -> suma
+    'salida',    -- consumo, uso en terapia       -> resta
+    'merma',     -- vencido, danado, extraviado   -> resta
+    'ajuste'     -- conteo fisico                 -> FIJA la existencia
+  );
+exception when duplicate_object then null; end $$;
+
+-- ----------------------------------------------------------------------------
+-- 3. Articulos
+-- ----------------------------------------------------------------------------
+
+create table if not exists public.inventario_articulos (
+  id             uuid primary key default gen_random_uuid(),
+  codigo         text not null unique check (length(btrim(codigo)) >= 2),
+  nombre         text not null check (length(btrim(nombre)) >= 3),
+  descripcion    text,
+  categoria      public.categoria_articulo not null default 'insumo',
+  unidad         text not null default 'unidad',   -- unidad, caja, rollo, par, ml, g
+  -- `existencia` NO se edita a mano: la mantiene el trigger de movimientos,
+  -- para que el saldo siempre cuadre con la bitacora.
+  existencia     numeric(12,2) not null default 0,
+  minimo         numeric(12,2) not null default 0 check (minimo >= 0),
+  ubicacion      text,
+  activo         boolean not null default true,
+  creado_en      timestamptz not null default now(),
+  creado_por     uuid references public.perfiles(id),
+  actualizado_en timestamptz not null default now()
+);
+
+comment on table public.inventario_articulos is
+  'Existencias de la clinica. La columna `existencia` la calcula el trigger de movimientos.';
+
+create index if not exists ix_inv_articulos_activos on public.inventario_articulos (nombre)
+  where activo;
+create index if not exists ix_inv_articulos_categoria on public.inventario_articulos (categoria)
+  where activo;
+create index if not exists ix_inv_articulos_bajos on public.inventario_articulos (existencia)
+  where activo and existencia <= minimo;
+
+drop trigger if exists tg_inv_articulos_actualizado on public.inventario_articulos;
+create trigger tg_inv_articulos_actualizado before update on public.inventario_articulos
+  for each row execute function public.tg_actualizar_timestamp();
+
+-- ----------------------------------------------------------------------------
+-- 4. Movimientos (bitacora inmutable)
+-- ----------------------------------------------------------------------------
+
+create table if not exists public.inventario_movimientos (
+  id                    uuid primary key default gen_random_uuid(),
+  articulo_id           uuid not null references public.inventario_articulos(id) on delete restrict,
+  tipo                  public.tipo_movimiento not null,
+  cantidad              numeric(12,2) not null check (cantidad >= 0),
+  existencia_anterior   numeric(12,2) not null,
+  existencia_resultante numeric(12,2) not null,
+  motivo                text,
+  referencia            text,          -- factura, orden de compra, no. de lote
+  realizado_por         uuid references public.perfiles(id),
+  creado_en             timestamptz not null default now()
+);
+
+create index if not exists ix_inv_mov_articulo on public.inventario_movimientos (articulo_id, creado_en desc);
+create index if not exists ix_inv_mov_fecha    on public.inventario_movimientos (creado_en desc);
+
+-- Aplica el movimiento y recalcula la existencia. Bloquea el articulo para que
+-- dos movimientos simultaneos no dejen el saldo torcido.
+create or replace function public.tg_inventario_aplicar_movimiento()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_actual numeric(12,2);
+  v_nueva  numeric(12,2);
+  v_nombre text;
+begin
+  select a.existencia, a.nombre into v_actual, v_nombre
+  from public.inventario_articulos a
+  where a.id = new.articulo_id
+  for update;
+
+  if v_actual is null then
+    raise exception 'Articulo de inventario no encontrado.' using errcode = 'no_data_found';
+  end if;
+
+  v_nueva := case new.tipo
+    when 'entrada' then v_actual + new.cantidad
+    when 'salida'  then v_actual - new.cantidad
+    when 'merma'   then v_actual - new.cantidad
+    when 'ajuste'  then new.cantidad        -- conteo fisico: fija el valor
+  end;
+
+  if v_nueva < 0 then
+    raise exception
+      'No hay existencia suficiente de "%": hay % y se intentan sacar %. Registre un ajuste por conteo fisico si el dato esta desfasado.',
+      v_nombre, v_actual, new.cantidad
+      using errcode = 'check_violation';
+  end if;
+
+  new.existencia_anterior   := v_actual;
+  new.existencia_resultante := v_nueva;
+  new.realizado_por         := coalesce(new.realizado_por, auth.uid());
+
+  update public.inventario_articulos
+     set existencia = v_nueva, actualizado_en = now()
+   where id = new.articulo_id;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists tg_inv_movimiento on public.inventario_movimientos;
+create trigger tg_inv_movimiento before insert on public.inventario_movimientos
+  for each row execute function public.tg_inventario_aplicar_movimiento();
+
+-- La bitacora no se corrige: se registra un movimiento nuevo.
+create or replace function public.tg_inventario_inmutable()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'Los movimientos de inventario no se editan ni se borran. Registre un ajuste.'
+    using errcode = 'insufficient_privilege';
+end;
+$$;
+
+drop trigger if exists tg_inv_mov_sin_cambios on public.inventario_movimientos;
+create trigger tg_inv_mov_sin_cambios before update or delete on public.inventario_movimientos
+  for each row execute function public.tg_inventario_inmutable();
+
+-- La existencia solo cambia por movimientos, nunca por un UPDATE directo.
+create or replace function public.tg_inventario_existencia_protegida()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if new.existencia is distinct from old.existencia
+     and current_setting('neoterapia.movimiento_inventario', true) is distinct from 'on' then
+    raise exception 'La existencia se cambia registrando un movimiento, no editando el articulo.'
+      using errcode = 'insufficient_privilege';
+  end if;
+  return new;
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 5. Vistas
+-- ----------------------------------------------------------------------------
+
+create or replace view public.v_inventario
+with (security_invoker = true) as
+select
+  a.*,
+  (a.activo and a.existencia <= a.minimo)                        as bajo_minimo,
+  (a.activo and a.existencia = 0)                                as agotado,
+  ult.ultimo_movimiento,
+  ult.ultimo_tipo,
+  p.nombre_completo                                              as creado_por_nombre
+from public.inventario_articulos a
+left join public.perfiles p on p.id = a.creado_por
+left join lateral (
+  select m.creado_en as ultimo_movimiento, m.tipo as ultimo_tipo
+  from public.inventario_movimientos m
+  where m.articulo_id = a.id
+  order by m.creado_en desc limit 1
+) ult on true;
+
+create or replace view public.v_inventario_movimientos
+with (security_invoker = true) as
+select
+  m.*,
+  a.codigo   as articulo_codigo,
+  a.nombre   as articulo_nombre,
+  a.unidad,
+  p.nombre_completo as responsable
+from public.inventario_movimientos m
+join public.inventario_articulos a on a.id = m.articulo_id
+left join public.perfiles p on p.id = m.realizado_por;
+
+-- ----------------------------------------------------------------------------
+-- 6. Seguridad
+-- ----------------------------------------------------------------------------
+
+alter table public.inventario_articulos   enable row level security;
+alter table public.inventario_movimientos enable row level security;
+
+grant select                         on public.inventario_articulos   to authenticated;
+grant insert, update, delete         on public.inventario_articulos   to authenticated;
+grant select, insert                 on public.inventario_movimientos to authenticated;
+grant select on public.v_inventario             to authenticated;
+grant select on public.v_inventario_movimientos to authenticated;
+
+-- Todo el personal consulta las existencias...
+drop policy if exists inv_articulos_select on public.inventario_articulos;
+create policy inv_articulos_select on public.inventario_articulos
+  for select to authenticated using (public.es_staff());
+
+-- ...pero solo administracion las administra.
+drop policy if exists inv_articulos_write on public.inventario_articulos;
+create policy inv_articulos_write on public.inventario_articulos
+  for all to authenticated using (public.es_admin()) with check (public.es_admin());
+
+drop policy if exists inv_mov_select on public.inventario_movimientos;
+create policy inv_mov_select on public.inventario_movimientos
+  for select to authenticated using (public.es_staff());
+
+drop policy if exists inv_mov_insert on public.inventario_movimientos;
+create policy inv_mov_insert on public.inventario_movimientos
+  for insert to authenticated with check (public.es_admin());
+
+-- El trigger que protege `existencia` se instala despues de las politicas para
+-- que la funcion de movimientos pueda seguir escribiendola.
+create or replace function public.registrar_movimiento_inventario(
+  p_articulo_id uuid,
+  p_tipo        public.tipo_movimiento,
+  p_cantidad    numeric,
+  p_motivo      text default null,
+  p_referencia  text default null
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_id  uuid;
+  v_res numeric(12,2);
+begin
+  if not public.es_admin() then
+    raise exception 'Su rol no permite mover el inventario.' using errcode = 'insufficient_privilege';
+  end if;
+  if p_cantidad is null or p_cantidad < 0 then
+    return jsonb_build_object('ok', false, 'error', 'cantidad_invalida',
+      'mensaje', 'La cantidad debe ser un numero positivo.');
+  end if;
+  if p_tipo <> 'ajuste' and p_cantidad = 0 then
+    return jsonb_build_object('ok', false, 'error', 'cantidad_invalida',
+      'mensaje', 'La cantidad debe ser mayor que cero.');
+  end if;
+
+  perform set_config('neoterapia.movimiento_inventario', 'on', true);
+
+  insert into public.inventario_movimientos
+    (articulo_id, tipo, cantidad, motivo, referencia, realizado_por)
+  values
+    (p_articulo_id, p_tipo, p_cantidad,
+     nullif(btrim(coalesce(p_motivo, '')), ''),
+     nullif(btrim(coalesce(p_referencia, '')), ''),
+     auth.uid())
+  returning id, existencia_resultante into v_id, v_res;
+
+  perform set_config('neoterapia.movimiento_inventario', 'off', true);
+
+  return jsonb_build_object('ok', true, 'movimiento_id', v_id, 'existencia', v_res);
+exception
+  when check_violation then
+    return jsonb_build_object('ok', false, 'error', 'sin_existencia', 'mensaje', sqlerrm);
+end;
+$$;
+
+drop trigger if exists tg_inv_existencia_protegida on public.inventario_articulos;
+create trigger tg_inv_existencia_protegida before update on public.inventario_articulos
+  for each row execute function public.tg_inventario_existencia_protegida();
+
+revoke execute on function public.registrar_movimiento_inventario(
+  uuid, public.tipo_movimiento, numeric, text, text) from public, anon;
+grant execute on function public.registrar_movimiento_inventario(
+  uuid, public.tipo_movimiento, numeric, text, text) to authenticated;
+
+-- ----------------------------------------------------------------------------
+-- 7. Resumen para el panel
+-- ----------------------------------------------------------------------------
+
+create or replace function public.resumen_inventario()
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select jsonb_build_object(
+    'articulos',    (select count(*) from public.inventario_articulos where activo),
+    'bajo_minimo',  (select count(*) from public.inventario_articulos
+                      where activo and existencia <= minimo),
+    'agotados',     (select count(*) from public.inventario_articulos
+                      where activo and existencia = 0),
+    'movimientos_semana', (select count(*) from public.inventario_movimientos
+                            where creado_en >= now() - interval '7 days')
+  )
+  where public.es_staff()
+$$;
+
+revoke execute on function public.resumen_inventario() from public, anon;
+grant execute on function public.resumen_inventario() to authenticated;
+
+-- ----------------------------------------------------------------------------
+-- 8. El tablero y el menu lateral necesitan el contador de bajo minimo
+-- ----------------------------------------------------------------------------
+
+create or replace function public.metricas_tablero()
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select jsonb_build_object(
+    'solicitudes_pendientes', (select count(*) from public.citas where estado = 'solicitada'),
+    'citas_hoy',              (select count(*) from public.citas
+                                where estado = 'confirmada'
+                                  and inicio_programado::date = current_date),
+    'citas_semana',           (select count(*) from public.citas
+                                where estado in ('confirmada', 'atendida')
+                                  and inicio_programado >= date_trunc('week', now())
+                                  and inicio_programado <  date_trunc('week', now()) + interval '7 days'),
+    'alertas_pendientes',     (select count(*) from public.alertas where estado = 'pendiente'),
+    'duplicados_pendientes',  (select count(*) from public.posibles_duplicados where estado = 'pendiente'),
+    'pacientes_activos',      (select count(*) from public.pacientes where estado = 'activo'),
+    'sesiones_sin_firmar',    (select count(*) from public.sesiones where firmada_en is null),
+    'mensajes_en_cola',       (select count(*) from public.mensajes where estado = 'pendiente'),
+    'inventario_bajo',        (select count(*) from public.inventario_articulos
+                                where activo and existencia <= minimo)
+  )
+  where public.es_staff()
+$$;
+
+grant execute on function public.metricas_tablero() to authenticated;
+
+-- ####################  20260825121400_15_fisioterapeuta_opcional.sql  ####################
+
+-- ============================================================================
+-- NeoTerapia · 15 · El fisioterapeuta deja de ser obligatorio al agendar
+-- ----------------------------------------------------------------------------
+-- Se puede confirmar una cita sin saber todavia quien la va a atender: la
+-- clinica lo asigna despues, o el mismo fisioterapeuta queda registrado cuando
+-- marca la asistencia.
+--
+-- Lo que SI sigue exigiendo fisioterapeuta es la nota clinica: un expediente
+-- sin autor no sirve como registro. `sesiones.fisioterapeuta_id` se queda NOT
+-- NULL a proposito.
+-- ============================================================================
+
+set search_path = public, extensions;
+
+-- ----------------------------------------------------------------------------
+-- Confirmar sin asignar
+-- ----------------------------------------------------------------------------
+
+drop function if exists public.confirmar_cita(uuid, timestamptz, uuid, int, text, text);
+
+create or replace function public.confirmar_cita(
+  p_cita_id           uuid,
+  p_inicio            timestamptz,
+  p_fisioterapeuta_id uuid default null,     -- <- ahora opcional
+  p_duracion_min      int  default null,
+  p_consultorio       text default null,
+  p_nota              text default null
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_dur     int := coalesce(p_duracion_min, public.config_int('duracion_cita_min', 45));
+  v_cita    public.citas%rowtype;
+  v_enlaces jsonb;
+begin
+  if public.mi_rol() not in ('superadmin', 'admin', 'recepcion') then
+    raise exception 'Su rol no permite confirmar citas.' using errcode = 'insufficient_privilege';
+  end if;
+
+  select * into v_cita from public.citas where id = p_cita_id for update;
+  if not found then
+    raise exception 'Cita no encontrada.' using errcode = 'no_data_found';
+  end if;
+  if v_cita.estado not in ('solicitada', 'confirmada') then
+    return jsonb_build_object('ok', false, 'error', 'estado_no_permite', 'estado', v_cita.estado);
+  end if;
+
+  update public.citas
+     set estado            = 'confirmada',
+         inicio_programado = p_inicio,
+         fin_programado    = p_inicio + make_interval(mins => v_dur),
+         fisioterapeuta_id = p_fisioterapeuta_id,
+         consultorio       = coalesce(p_consultorio, consultorio),
+         notas_internas    = coalesce(p_nota, notas_internas),
+         motivo_estado     = null,
+         resuelta_por      = auth.uid(),
+         resuelta_en       = now()
+   where id = p_cita_id;
+
+  -- Solo se adopta como fisioterapeuta principal si de verdad se asigno uno.
+  if p_fisioterapeuta_id is not null then
+    update public.pacientes
+       set fisioterapeuta_id = p_fisioterapeuta_id
+     where id = v_cita.paciente_id and fisioterapeuta_id is null;
+  end if;
+
+  v_enlaces := public.emitir_enlaces_cita(p_cita_id);
+  perform public.encolar_mensaje(p_cita_id, 'confirmacion', jsonb_build_object(
+    'enlaces', format(E'Confirmar asistencia: %s\nCancelar: %s',
+                      v_enlaces ->> 'confirmar', v_enlaces ->> 'cancelar')
+  ));
+
+  return jsonb_build_object(
+    'ok', true, 'estado', 'confirmada', 'enlaces', v_enlaces,
+    'sin_fisioterapeuta', p_fisioterapeuta_id is null);
+exception
+  when exclusion_violation then
+    return jsonb_build_object('ok', false, 'error', 'traslape',
+      'mensaje', 'Ese fisioterapeuta ya tiene una cita confirmada en ese horario.');
+end;
+$$;
+
+comment on function public.confirmar_cita is
+  'Confirma y agenda. El fisioterapeuta es opcional: se puede asignar despues con asignar_fisioterapeuta().';
+
+-- ----------------------------------------------------------------------------
+-- Asignar (o cambiar) el fisioterapeuta de una cita ya confirmada
+-- ----------------------------------------------------------------------------
+-- Deliberadamente NO reenvia el mensaje de confirmacion ni reemite enlaces:
+-- para el paciente no cambia nada, la cita sigue a la misma hora.
+
+create or replace function public.asignar_fisioterapeuta(
+  p_cita_id           uuid,
+  p_fisioterapeuta_id uuid
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_cita public.citas%rowtype;
+  v_rol  public.rol_usuario;
+begin
+  if public.mi_rol() not in ('superadmin', 'admin', 'recepcion') then
+    raise exception 'Su rol no permite asignar fisioterapeutas.' using errcode = 'insufficient_privilege';
+  end if;
+
+  select * into v_cita from public.citas where id = p_cita_id for update;
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'no_existe');
+  end if;
+  if v_cita.estado not in ('solicitada', 'confirmada') then
+    return jsonb_build_object('ok', false, 'error', 'estado_no_permite', 'estado', v_cita.estado);
+  end if;
+
+  if p_fisioterapeuta_id is not null then
+    select rol into v_rol from public.perfiles where id = p_fisioterapeuta_id and activo;
+    if v_rol is distinct from 'fisioterapeuta' then
+      return jsonb_build_object('ok', false, 'error', 'no_es_fisioterapeuta',
+        'mensaje', 'El usuario seleccionado no es un fisioterapeuta activo.');
+    end if;
+  end if;
+
+  update public.citas
+     set fisioterapeuta_id = p_fisioterapeuta_id
+   where id = p_cita_id;
+
+  if p_fisioterapeuta_id is not null then
+    update public.pacientes
+       set fisioterapeuta_id = p_fisioterapeuta_id
+     where id = v_cita.paciente_id and fisioterapeuta_id is null;
+  end if;
+
+  return jsonb_build_object('ok', true, 'fisioterapeuta_id', p_fisioterapeuta_id);
+exception
+  when exclusion_violation then
+    return jsonb_build_object('ok', false, 'error', 'traslape',
+      'mensaje', 'Ese fisioterapeuta ya tiene una cita confirmada en ese horario.');
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Asistencia: el fisioterapeuta que atiende se registra solo
+-- ----------------------------------------------------------------------------
+
+create or replace function public.marcar_asistencia(p_cita_id uuid, p_asistio boolean)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_cita   public.citas%rowtype;
+  v_sesion uuid;
+  v_rol    public.rol_usuario := public.mi_rol();
+  v_fisio  uuid;
+begin
+  select * into v_cita from public.citas where id = p_cita_id;
+  if not found then
+    raise exception 'Cita no encontrada.' using errcode = 'no_data_found';
+  end if;
+
+  if v_rol not in ('superadmin', 'admin', 'recepcion')
+     and not (v_rol = 'fisioterapeuta' and (
+       v_cita.fisioterapeuta_id = auth.uid() or v_cita.fisioterapeuta_id is null)) then
+    raise exception 'Su rol no permite registrar asistencia en esta cita.'
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  if not p_asistio then
+    update public.citas
+       set estado = 'ausente', resuelta_por = auth.uid(), resuelta_en = now()
+     where id = p_cita_id;
+    return jsonb_build_object('ok', true, 'estado', 'ausente');
+  end if;
+
+  -- ¿Quien firma la nota? La cita si la trae; si no, quien marca la asistencia
+  -- siempre que sea fisioterapeuta. Una nota clinica sin autor no sirve.
+  v_fisio := v_cita.fisioterapeuta_id;
+  if v_fisio is null and v_rol = 'fisioterapeuta' then
+    v_fisio := auth.uid();
+    update public.citas set fisioterapeuta_id = v_fisio where id = p_cita_id;
+  end if;
+
+  if v_fisio is null then
+    return jsonb_build_object('ok', false, 'error', 'falta_fisioterapeuta',
+      'mensaje', 'Asigne un fisioterapeuta a la cita antes de marcarla como atendida: la nota clinica necesita autor.');
+  end if;
+
+  update public.citas
+     set estado = 'atendida', asistio_en = now(), resuelta_por = auth.uid(), resuelta_en = now()
+   where id = p_cita_id;
+
+  -- `tg_pacientes_control_edicion` impide que un fisioterapeuta toque la
+  -- asignacion del paciente. Aqui no la esta editando a mano: la esta ganando
+  -- por atender la cita, asi que se marca como operacion interna.
+  perform set_config('neoterapia.operacion_interna', 'on', true);
+  update public.pacientes
+     set fisioterapeuta_id = v_fisio
+   where id = v_cita.paciente_id and fisioterapeuta_id is null;
+  perform set_config('neoterapia.operacion_interna', 'off', true);
+
+  insert into public.sesiones (cita_id, paciente_id, fisioterapeuta_id, inicio)
+  values (p_cita_id, v_cita.paciente_id, v_fisio, coalesce(v_cita.inicio_programado, now()))
+  on conflict (cita_id) do nothing
+  returning id into v_sesion;
+
+  if v_sesion is null then
+    select id into v_sesion from public.sesiones where cita_id = p_cita_id;
+  end if;
+
+  -- Se precargan las areas que el paciente declaro, para que el fisioterapeuta
+  -- parta del mapa corporal que el mismo marco.
+  insert into public.sesion_areas (sesion_id, area_id, nivel_dolor)
+  select v_sesion, ca.area_id, coalesce(ca.intensidad, 0)
+  from public.cita_areas ca where ca.cita_id = p_cita_id
+  on conflict (sesion_id, area_id) do nothing;
+
+  return jsonb_build_object('ok', true, 'estado', 'atendida', 'sesion_id', v_sesion);
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Privilegios
+-- ----------------------------------------------------------------------------
+
+revoke execute on function public.asignar_fisioterapeuta(uuid, uuid) from public, anon;
+grant execute on function public.asignar_fisioterapeuta(uuid, uuid) to authenticated;
+grant execute on function public.confirmar_cita(uuid, timestamptz, uuid, int, text, text) to authenticated;
+grant execute on function public.marcar_asistencia(uuid, boolean) to authenticated;
+
+-- ####################  20260825121500_16_mapa_por_sesion.sql  ####################
+
+-- ============================================================================
+-- NeoTerapia · 16 · Historial del mapa corporal, momento por momento
+-- ----------------------------------------------------------------------------
+-- `sesion_areas` YA guardaba el mapa por sesion. Lo que faltaba era poder
+-- recorrerlo: `mapa_evolucion()` devolvia puntos sueltos y la ficha terminaba
+-- pintando un solo mapa "actual" mezclando todo.
+--
+-- Esta funcion devuelve un momento por fila (la solicitud del paciente y cada
+-- sesion), con su mapa completo, para poder navegar el historial y comparar.
+-- ============================================================================
+
+set search_path = public, extensions;
+
+create or replace function public.historial_mapa_corporal(p_paciente_id uuid)
+returns table (
+  momento_id       uuid,
+  momento_tipo     text,          -- 'solicitud' | 'sesion'
+  fecha            timestamptz,
+  etiqueta         text,
+  firmada          boolean,
+  responsable      text,
+  dolor_promedio   numeric(4,1),
+  dolor_maximo     int,
+  areas            jsonb
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  -- Lo que el paciente marco al pedir la cita
+  select
+    c.id,
+    'solicitud'::text,
+    c.creado_en,
+    'Solicitud ' || c.codigo_referencia,
+    null::boolean,
+    null::text,
+    round(avg(ca.intensidad)::numeric, 1),
+    max(ca.intensidad),
+    jsonb_agg(jsonb_build_object(
+      'codigo', a.codigo, 'nombre', a.nombre, 'vista', a.vista,
+      'svg_x', a.svg_x, 'svg_y', a.svg_y,
+      'nivel_dolor', ca.intensidad, 'observacion', ca.nota
+    ) order by a.orden)
+  from public.cita_areas ca
+  join public.citas c        on c.id = ca.cita_id
+  join public.areas_cuerpo a on a.id = ca.area_id
+  where c.paciente_id = p_paciente_id
+    and ca.intensidad is not null
+    and public.puedo_ver_paciente(p_paciente_id)
+  group by c.id, c.creado_en, c.codigo_referencia
+
+  union all
+
+  -- Lo que el fisioterapeuta registro en cada sesion
+  select
+    s.id,
+    'sesion'::text,
+    s.inicio,
+    'Sesión',
+    s.firmada_en is not null,
+    p.nombre_completo,
+    round(avg(sa.nivel_dolor)::numeric, 1),
+    max(sa.nivel_dolor),
+    jsonb_agg(jsonb_build_object(
+      'codigo', a.codigo, 'nombre', a.nombre, 'vista', a.vista,
+      'svg_x', a.svg_x, 'svg_y', a.svg_y,
+      'nivel_dolor', sa.nivel_dolor, 'movilidad', sa.movilidad,
+      'inflamacion', sa.inflamacion, 'observacion', sa.observacion
+    ) order by a.orden)
+  from public.sesion_areas sa
+  join public.sesiones s     on s.id = sa.sesion_id
+  join public.areas_cuerpo a on a.id = sa.area_id
+  left join public.perfiles p on p.id = s.fisioterapeuta_id
+  where s.paciente_id = p_paciente_id
+    and public.puedo_ver_clinico(p_paciente_id)
+  group by s.id, s.inicio, s.firmada_en, p.nombre_completo
+
+  order by 3
+$$;
+
+comment on function public.historial_mapa_corporal(uuid) is
+  'Un mapa corporal por momento (solicitud o sesion), para recorrer el historial en vez de ver solo el ultimo estado.';
+
+revoke execute on function public.historial_mapa_corporal(uuid) from public, anon;
+grant execute on function public.historial_mapa_corporal(uuid) to authenticated;
+
+-- ####################  20260825121600_17_indicadores.sql  ####################
+
+-- ============================================================================
+-- NeoTerapia · 17 · Indicadores (KPIs) de operacion y cobro
+-- ----------------------------------------------------------------------------
+-- Todo se cuenta por fecha LOCAL de la clinica, no UTC: una cita de las 7 p.m.
+-- del lunes en Guatemala es UTC del martes, y contarla en el dia equivocado
+-- desalinearia el corte diario con lo que ve la recepcion.
+--
+-- "Cobrada" = la cita atendida tiene al menos un pago aplicado ligado a ella
+-- (`pagos.cita_id`). Por eso importa ligar el pago a la cita al registrarlo:
+-- un pago suelto suma a los ingresos pero no marca la visita como cobrada.
+-- ============================================================================
+
+set search_path = public, extensions;
+
+create or replace function public.tz_clinica()
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce(public.config('zona_horaria') #>> '{}', 'America/Guatemala')
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Resumen del periodo
+-- ----------------------------------------------------------------------------
+
+create or replace function public.kpis_resumen(p_desde date, p_hasta date)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  v_tz   text := public.tz_clinica();
+  v_c    record;
+  v_p    record;
+  v_cob  int;
+begin
+  if not (public.es_admin() or public.es_recepcion()) then
+    raise exception 'Su rol no permite ver los indicadores.' using errcode = 'insufficient_privilege';
+  end if;
+
+  select
+    count(*)                                                       as totales,
+    count(*) filter (where estado = 'atendida')                    as atendidas,
+    count(*) filter (where estado = 'cancelada')                   as canceladas,
+    count(*) filter (where estado = 'rechazada')                   as rechazadas,
+    count(*) filter (where estado = 'ausente')                     as ausentes,
+    count(*) filter (where estado = 'confirmada')                  as confirmadas,
+    count(*) filter (where estado = 'solicitada')                  as solicitadas,
+    count(distinct paciente_id) filter (where estado = 'atendida') as pacientes_atendidos,
+    count(distinct paciente_id) filter (where estado = 'cancelada') as pacientes_cancelados
+  into v_c
+  from public.citas c
+  where coalesce((c.inicio_programado at time zone v_tz)::date, c.fecha_solicitada)
+        between p_desde and p_hasta;
+
+  select
+    coalesce(sum(monto), 0)                                    as ingresos,
+    count(*)                                                   as pagos,
+    count(distinct paciente_id)                                as pacientes_cobrados,
+    coalesce(jsonb_object_agg(metodo, total), '{}'::jsonb)     as por_metodo
+  into v_p
+  from (
+    select pg.metodo, pg.monto, pg.paciente_id,
+           sum(pg.monto) over (partition by pg.metodo) as total
+    from public.pagos pg
+    where pg.estado = 'pagado'
+      and (pg.fecha at time zone v_tz)::date between p_desde and p_hasta
+  ) x;
+
+  -- Citas atendidas del periodo que tienen al menos un pago ligado
+  select count(*) into v_cob
+  from public.citas c
+  where c.estado = 'atendida'
+    and coalesce((c.inicio_programado at time zone v_tz)::date, c.fecha_solicitada)
+        between p_desde and p_hasta
+    and exists (
+      select 1 from public.pagos pg
+      where pg.cita_id = c.id and pg.estado = 'pagado');
+
+  return jsonb_build_object(
+    'desde', p_desde,
+    'hasta', p_hasta,
+    'citas_totales',        v_c.totales,
+    'atendidas',            v_c.atendidas,
+    'canceladas',           v_c.canceladas,
+    'rechazadas',           v_c.rechazadas,
+    'ausentes',             v_c.ausentes,
+    'confirmadas',          v_c.confirmadas,
+    'solicitadas',          v_c.solicitadas,
+    'pacientes_atendidos',  v_c.pacientes_atendidos,
+    'pacientes_cancelados', v_c.pacientes_cancelados,
+    'pacientes_nuevos',     (select count(*) from public.pacientes p
+                              where (p.creado_en at time zone v_tz)::date between p_desde and p_hasta
+                                and p.estado <> 'fusionado'),
+    'atendidas_cobradas',   v_cob,
+    'atendidas_sin_cobrar', greatest(v_c.atendidas - v_cob, 0),
+    'ingresos',             coalesce(v_p.ingresos, 0),
+    'pagos_registrados',    coalesce(v_p.pagos, 0),
+    'pacientes_cobrados',   coalesce(v_p.pacientes_cobrados, 0),
+    'ticket_promedio',      case when coalesce(v_p.pagos, 0) > 0
+                                 then round(v_p.ingresos / v_p.pagos, 2) else 0 end,
+    'ingresos_por_metodo',  coalesce(v_p.por_metodo, '{}'::jsonb),
+    'tasa_asistencia',      case when (v_c.atendidas + v_c.ausentes) > 0
+                                 then round(100.0 * v_c.atendidas / (v_c.atendidas + v_c.ausentes), 1)
+                                 else null end,
+    'tasa_cobro',           case when v_c.atendidas > 0
+                                 then round(100.0 * v_cob / v_c.atendidas, 1)
+                                 else null end
+  );
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Serie temporal
+-- ----------------------------------------------------------------------------
+-- Devuelve TODOS los periodos del rango, incluso los vacios: una grafica con
+-- huecos miente sobre la cadencia del negocio.
+
+create or replace function public.kpis_serie(
+  p_desde         date,
+  p_hasta         date,
+  p_granularidad  text default 'day'    -- day | week | month
+) returns table (
+  periodo     date,
+  ingresos    numeric(12,2),
+  pagos       int,
+  atendidas   int,
+  canceladas  int,
+  ausentes    int
+)
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  v_tz   text := public.tz_clinica();
+  v_gran text := lower(coalesce(p_granularidad, 'day'));
+  v_step interval;
+begin
+  if not (public.es_admin() or public.es_recepcion()) then
+    raise exception 'Su rol no permite ver los indicadores.' using errcode = 'insufficient_privilege';
+  end if;
+
+  if v_gran not in ('day', 'week', 'month') then v_gran := 'day'; end if;
+  v_step := case v_gran when 'day' then interval '1 day'
+                        when 'week' then interval '1 week'
+                        else interval '1 month' end;
+
+  return query
+  with periodos as (
+    select generate_series(
+      date_trunc(v_gran, p_desde::timestamp),
+      date_trunc(v_gran, p_hasta::timestamp),
+      v_step
+    )::date as p
+  ),
+  dinero as (
+    select date_trunc(v_gran, (pg.fecha at time zone v_tz))::date as p,
+           sum(pg.monto) as monto, count(*) as n
+    from public.pagos pg
+    where pg.estado = 'pagado'
+      and (pg.fecha at time zone v_tz)::date between p_desde and p_hasta
+    group by 1
+  ),
+  visitas as (
+    select date_trunc(v_gran,
+             coalesce((c.inicio_programado at time zone v_tz),
+                      c.fecha_solicitada::timestamp))::date as p,
+           count(*) filter (where c.estado = 'atendida')  as atendidas,
+           count(*) filter (where c.estado = 'cancelada') as canceladas,
+           count(*) filter (where c.estado = 'ausente')   as ausentes
+    from public.citas c
+    where coalesce((c.inicio_programado at time zone v_tz)::date, c.fecha_solicitada)
+          between p_desde and p_hasta
+    group by 1
+  )
+  select
+    pe.p,
+    coalesce(d.monto, 0)::numeric(12,2),
+    coalesce(d.n, 0)::int,
+    coalesce(v.atendidas, 0)::int,
+    coalesce(v.canceladas, 0)::int,
+    coalesce(v.ausentes, 0)::int
+  from periodos pe
+  left join dinero  d on d.p = pe.p
+  left join visitas v on v.p = pe.p
+  order by pe.p;
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Las visitas que quedaron sin cobrar
+-- ----------------------------------------------------------------------------
+-- No basta con el numero: para que el indicador sirva hay que poder ir a
+-- resolverlo. Esta lista es accionable desde el panel.
+
+create or replace function public.kpis_sin_cobrar(p_desde date, p_hasta date)
+returns table (
+  cita_id           uuid,
+  codigo_referencia text,
+  fecha             timestamptz,
+  paciente_id       uuid,
+  paciente          text,
+  dpi_mascara       text,
+  fisioterapeuta    text,
+  cargos            numeric(12,2)
+)
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare v_tz text := public.tz_clinica();
+begin
+  if not (public.es_admin() or public.es_recepcion()) then
+    raise exception 'Su rol no permite ver los indicadores.' using errcode = 'insufficient_privilege';
+  end if;
+
+  return query
+  select
+    c.id, c.codigo_referencia, c.inicio_programado,
+    p.id, p.nombre_completo, p.dpi_mascara, f.nombre_completo,
+    coalesce((
+      select sum(st.precio_aplicado * st.cantidad)
+      from public.sesion_tratamientos st
+      join public.sesiones s on s.id = st.sesion_id
+      where s.cita_id = c.id
+    ), 0)::numeric(12,2)
+  from public.citas c
+  join public.pacientes p on p.id = c.paciente_id
+  left join public.perfiles f on f.id = c.fisioterapeuta_id
+  where c.estado = 'atendida'
+    and coalesce((c.inicio_programado at time zone v_tz)::date, c.fecha_solicitada)
+        between p_desde and p_hasta
+    and not exists (
+      select 1 from public.pagos pg
+      where pg.cita_id = c.id and pg.estado = 'pagado')
+  order by c.inicio_programado desc nulls last
+  limit 200;
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Privilegios
+-- ----------------------------------------------------------------------------
+
+revoke execute on function public.kpis_resumen(date, date)          from public, anon;
+revoke execute on function public.kpis_serie(date, date, text)      from public, anon;
+revoke execute on function public.kpis_sin_cobrar(date, date)       from public, anon;
+revoke execute on function public.tz_clinica()                      from public, anon;
+
+grant execute on function public.kpis_resumen(date, date)     to authenticated;
+grant execute on function public.kpis_serie(date, date, text) to authenticated;
+grant execute on function public.kpis_sin_cobrar(date, date)  to authenticated;
+grant execute on function public.tz_clinica()                 to authenticated;
+
+-- ####################  20260825121700_18_quien_atiende.sql  ####################
+
+-- ============================================================================
+-- NeoTerapia · 18 · Quien atiende deja de ser solo el rol "fisioterapeuta"
+-- ----------------------------------------------------------------------------
+-- En una clinica pequena el dueno tambien pasa consulta. Hasta ahora el sistema
+-- confundia dos cosas distintas:
+--
+--   ROL      = que puede administrar (usuarios, precios, configuracion)
+--   ATIENDE  = si pasa consulta y por lo tanto puede aparecer en la agenda,
+--              quedar asignado a una cita y firmar la nota clinica
+--
+-- Se separan con la columna `perfiles.atiende`. Un fisioterapeuta siempre
+-- atiende (es lo que significa el rol). Un superadministrador o un
+-- administrador atiende si esta marcado. Recepcion nunca: no ve lo clinico, y
+-- asignarle una cita crearia una nota sin autor legitimo.
+--
+-- Solo el superadministrador puede activar o quitar esa marca; si no, cualquiera
+-- podria auto-asignarse citas editando su propio perfil.
+-- ============================================================================
+
+set search_path = public, extensions;
+
+-- ----------------------------------------------------------------------------
+-- La columna
+-- ----------------------------------------------------------------------------
+
+alter table public.perfiles
+  add column if not exists atiende boolean not null default false;
+
+comment on column public.perfiles.atiende is
+  'Pasa consulta: aparece en la agenda, se le asignan citas y firma notas. El rol fisioterapeuta lo tiene siempre; recepcion nunca.';
+
+-- ----------------------------------------------------------------------------
+-- Coherencia: el rol manda sobre los extremos
+-- ----------------------------------------------------------------------------
+
+create or replace function public.tg_perfiles_atiende()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if new.rol = 'fisioterapeuta' then
+    new.atiende := true;            -- es la definicion del rol
+  elsif new.rol = 'recepcion' then
+    new.atiende := false;           -- recepcion no ve lo clinico
+  end if;
+  new.atiende := coalesce(new.atiende, false);
+  return new;
+end;
+$$;
+
+drop trigger if exists tg_perfiles_atiende on public.perfiles;
+create trigger tg_perfiles_atiende before insert or update on public.perfiles
+  for each row execute function public.tg_perfiles_atiende();
+
+-- El control de rol tambien vigila `atiende`: cambiarla es dar o quitar
+-- capacidad clinica, no es una preferencia personal.
+create or replace function public.tg_perfiles_control_rol()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if (new.rol is distinct from old.rol or new.activo is distinct from old.activo)
+     and not public.es_superadmin()
+  then
+    raise exception 'Solo un superadministrador puede cambiar el rol o el estado de un usuario.'
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  -- `mi_rol() is not null` deja pasar el mantenimiento hecho directamente en la
+  -- base (migraciones, SQL Editor): ahi no hay JWT que consultar.
+  if new.atiende is distinct from old.atiende
+     and public.mi_rol() is not null
+     and not public.es_superadmin()
+  then
+    raise exception 'Solo un superadministrador define quien atiende pacientes.'
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  if new.rol is distinct from old.rol then
+    perform public.registrar_auditoria(
+      'cambiar_rol', 'perfiles', new.id::text, null,
+      format('Rol %s -> %s', old.rol, new.rol),
+      jsonb_build_object('rol', old.rol), jsonb_build_object('rol', new.rol));
+  end if;
+
+  if new.atiende is distinct from old.atiende then
+    perform public.registrar_auditoria(
+      'cambiar_rol', 'perfiles', new.id::text, null,
+      case when new.atiende then 'Ahora atiende pacientes'
+           else 'Deja de atender pacientes' end,
+      jsonb_build_object('atiende', old.atiende),
+      jsonb_build_object('atiende', new.atiende));
+  end if;
+
+  return new;
+end;
+$$;
+
+-- Estado inicial: los fisioterapeutas y el superadministrador que instala el
+-- sistema. Si el superadministrador no pasa consulta, lo desmarca desde
+-- Administracion y deja de aparecer en la agenda.
+update public.perfiles
+   set atiende = true
+ where rol in ('fisioterapeuta', 'superadmin')
+   and atiende is distinct from true;
+
+update public.perfiles
+   set atiende = false
+ where rol = 'recepcion'
+   and atiende is distinct from false;
+
+-- ----------------------------------------------------------------------------
+-- Helpers
+-- ----------------------------------------------------------------------------
+
+-- Ojo: `es_fisio()` NO cambia. Sigue significando "tiene el rol
+-- fisioterapeuta", y en las politicas RLS sirve para RESTRINGIR (ve solo sus
+-- pacientes). Ampliarla le quitaria visibilidad al administrador.
+
+create or replace function public.puede_atender(p_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.perfiles p
+    where p.id = p_id and p.activo and p.atiende
+  )
+$$;
+
+comment on function public.puede_atender is
+  'Ese usuario pasa consulta: se le puede asignar una cita y puede firmar notas.';
+
+create or replace function public.atiendo()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.puede_atender(auth.uid())
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Confirmar: valida que quien se asigna realmente atienda
+-- ----------------------------------------------------------------------------
+
+drop function if exists public.confirmar_cita(uuid, timestamptz, uuid, int, text, text);
+
+create or replace function public.confirmar_cita(
+  p_cita_id           uuid,
+  p_inicio            timestamptz,
+  p_fisioterapeuta_id uuid default null,
+  p_duracion_min      int  default null,
+  p_consultorio       text default null,
+  p_nota              text default null
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_dur     int := coalesce(p_duracion_min, public.config_int('duracion_cita_min', 45));
+  v_cita    public.citas%rowtype;
+  v_enlaces jsonb;
+begin
+  if public.mi_rol() not in ('superadmin', 'admin', 'recepcion') then
+    raise exception 'Su rol no permite confirmar citas.' using errcode = 'insufficient_privilege';
+  end if;
+
+  if p_fisioterapeuta_id is not null and not public.puede_atender(p_fisioterapeuta_id) then
+    return jsonb_build_object('ok', false, 'error', 'no_atiende',
+      'mensaje', 'El usuario seleccionado no esta marcado como que atiende pacientes.');
+  end if;
+
+  select * into v_cita from public.citas where id = p_cita_id for update;
+  if not found then
+    raise exception 'Cita no encontrada.' using errcode = 'no_data_found';
+  end if;
+  if v_cita.estado not in ('solicitada', 'confirmada') then
+    return jsonb_build_object('ok', false, 'error', 'estado_no_permite', 'estado', v_cita.estado);
+  end if;
+
+  update public.citas
+     set estado            = 'confirmada',
+         inicio_programado = p_inicio,
+         fin_programado    = p_inicio + make_interval(mins => v_dur),
+         fisioterapeuta_id = p_fisioterapeuta_id,
+         consultorio       = coalesce(p_consultorio, consultorio),
+         notas_internas    = coalesce(p_nota, notas_internas),
+         motivo_estado     = null,
+         resuelta_por      = auth.uid(),
+         resuelta_en       = now()
+   where id = p_cita_id;
+
+  if p_fisioterapeuta_id is not null then
+    update public.pacientes
+       set fisioterapeuta_id = p_fisioterapeuta_id
+     where id = v_cita.paciente_id and fisioterapeuta_id is null;
+  end if;
+
+  v_enlaces := public.emitir_enlaces_cita(p_cita_id);
+  perform public.encolar_mensaje(p_cita_id, 'confirmacion', jsonb_build_object(
+    'enlaces', format(E'Confirmar asistencia: %s\nCancelar: %s',
+                      v_enlaces ->> 'confirmar', v_enlaces ->> 'cancelar')
+  ));
+
+  return jsonb_build_object(
+    'ok', true, 'estado', 'confirmada', 'enlaces', v_enlaces,
+    'sin_fisioterapeuta', p_fisioterapeuta_id is null);
+exception
+  when exclusion_violation then
+    return jsonb_build_object('ok', false, 'error', 'traslape',
+      'mensaje', 'Esa persona ya tiene una cita confirmada en ese horario.');
+end;
+$$;
+
+comment on function public.confirmar_cita is
+  'Confirma y agenda. Quien atiende es opcional y puede ser cualquier perfil con atiende = true.';
+
+-- ----------------------------------------------------------------------------
+-- Asignar: ya no exige el rol, exige la marca
+-- ----------------------------------------------------------------------------
+
+create or replace function public.asignar_fisioterapeuta(
+  p_cita_id           uuid,
+  p_fisioterapeuta_id uuid
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_cita public.citas%rowtype;
+begin
+  if public.mi_rol() not in ('superadmin', 'admin', 'recepcion') then
+    raise exception 'Su rol no permite asignar quien atiende.' using errcode = 'insufficient_privilege';
+  end if;
+
+  select * into v_cita from public.citas where id = p_cita_id for update;
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'no_existe');
+  end if;
+  if v_cita.estado not in ('solicitada', 'confirmada') then
+    return jsonb_build_object('ok', false, 'error', 'estado_no_permite', 'estado', v_cita.estado);
+  end if;
+
+  if p_fisioterapeuta_id is not null and not public.puede_atender(p_fisioterapeuta_id) then
+    return jsonb_build_object('ok', false, 'error', 'no_atiende',
+      'mensaje', 'El usuario seleccionado no esta marcado como que atiende pacientes.');
+  end if;
+
+  update public.citas
+     set fisioterapeuta_id = p_fisioterapeuta_id
+   where id = p_cita_id;
+
+  if p_fisioterapeuta_id is not null then
+    update public.pacientes
+       set fisioterapeuta_id = p_fisioterapeuta_id
+     where id = v_cita.paciente_id and fisioterapeuta_id is null;
+  end if;
+
+  return jsonb_build_object('ok', true, 'fisioterapeuta_id', p_fisioterapeuta_id);
+exception
+  when exclusion_violation then
+    return jsonb_build_object('ok', false, 'error', 'traslape',
+      'mensaje', 'Esa persona ya tiene una cita confirmada en ese horario.');
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Asistencia: quien atiende se registra solo, tenga el rol que tenga
+-- ----------------------------------------------------------------------------
+
+create or replace function public.marcar_asistencia(p_cita_id uuid, p_asistio boolean)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_cita   public.citas%rowtype;
+  v_sesion uuid;
+  v_rol    public.rol_usuario := public.mi_rol();
+  v_fisio  uuid;
+begin
+  select * into v_cita from public.citas where id = p_cita_id;
+  if not found then
+    raise exception 'Cita no encontrada.' using errcode = 'no_data_found';
+  end if;
+
+  if v_rol not in ('superadmin', 'admin', 'recepcion')
+     and not (public.atiendo() and (
+       v_cita.fisioterapeuta_id = auth.uid() or v_cita.fisioterapeuta_id is null)) then
+    raise exception 'Su rol no permite registrar asistencia en esta cita.'
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  if not p_asistio then
+    update public.citas
+       set estado = 'ausente', resuelta_por = auth.uid(), resuelta_en = now()
+     where id = p_cita_id;
+    return jsonb_build_object('ok', true, 'estado', 'ausente');
+  end if;
+
+  -- ¿Quien firma la nota? La cita si la trae; si no, quien marca la asistencia
+  -- siempre que atienda pacientes. Una nota clinica sin autor no sirve.
+  v_fisio := v_cita.fisioterapeuta_id;
+  if v_fisio is null and public.atiendo() then
+    v_fisio := auth.uid();
+    update public.citas set fisioterapeuta_id = v_fisio where id = p_cita_id;
+  end if;
+
+  if v_fisio is null then
+    return jsonb_build_object('ok', false, 'error', 'falta_fisioterapeuta',
+      'mensaje', 'Asigne quien atiende antes de marcar la cita como atendida: la nota clinica necesita autor.');
+  end if;
+
+  update public.citas
+     set estado = 'atendida', asistio_en = now(), resuelta_por = auth.uid(), resuelta_en = now()
+   where id = p_cita_id;
+
+  perform set_config('neoterapia.operacion_interna', 'on', true);
+  update public.pacientes
+     set fisioterapeuta_id = v_fisio
+   where id = v_cita.paciente_id and fisioterapeuta_id is null;
+  perform set_config('neoterapia.operacion_interna', 'off', true);
+
+  insert into public.sesiones (cita_id, paciente_id, fisioterapeuta_id, inicio)
+  values (p_cita_id, v_cita.paciente_id, v_fisio, coalesce(v_cita.inicio_programado, now()))
+  on conflict (cita_id) do nothing
+  returning id into v_sesion;
+
+  if v_sesion is null then
+    select id into v_sesion from public.sesiones where cita_id = p_cita_id;
+  end if;
+
+  insert into public.sesion_areas (sesion_id, area_id, nivel_dolor)
+  select v_sesion, ca.area_id, coalesce(ca.intensidad, 0)
+  from public.cita_areas ca where ca.cita_id = p_cita_id
+  on conflict (sesion_id, area_id) do nothing;
+
+  return jsonb_build_object('ok', true, 'estado', 'atendida', 'sesion_id', v_sesion);
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Alta de usuarios: la casilla "atiende pacientes"
+-- ----------------------------------------------------------------------------
+
+drop function if exists public.crear_usuario_personal(
+  text, text, text, public.rol_usuario, text, text, text, text);
+
+create or replace function public.crear_usuario_personal(
+  p_email        text,
+  p_clave        text,
+  p_nombre       text,
+  p_rol          public.rol_usuario,
+  p_telefono     text default null,
+  p_colegiado    text default null,
+  p_especialidad text default null,
+  p_color        text default null,
+  p_atiende      boolean default null
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  v_email   text := lower(btrim(coalesce(p_email, '')));
+  v_nombre  text := btrim(coalesce(p_nombre, ''));
+  v_atiende boolean;
+  v_id      uuid;
+begin
+  if not public.es_superadmin() then
+    raise exception 'Solo un superadministrador puede crear usuarios.'
+      using errcode = 'insufficient_privilege';
+  end if;
+
+  if v_email !~ '^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$' then
+    return jsonb_build_object('ok', false, 'error', 'correo_invalido',
+      'mensaje', 'El correo no tiene un formato valido.');
+  end if;
+
+  if length(coalesce(p_clave, '')) < 10 then
+    return jsonb_build_object('ok', false, 'error', 'clave_corta',
+      'mensaje', 'La contrasena debe tener al menos 10 caracteres.');
+  end if;
+
+  if length(v_nombre) < 5 or array_length(string_to_array(v_nombre, ' '), 1) < 2 then
+    return jsonb_build_object('ok', false, 'error', 'nombre_invalido',
+      'mensaje', 'Escriba nombre y apellido.');
+  end if;
+
+  if p_color is not null and p_color !~ '^#[0-9a-fA-F]{6}$' then
+    return jsonb_build_object('ok', false, 'error', 'color_invalido',
+      'mensaje', 'El color debe ir en formato #rrggbb.');
+  end if;
+
+  if exists (select 1 from auth.users u where lower(u.email) = v_email) then
+    return jsonb_build_object('ok', false, 'error', 'correo_existente',
+      'mensaje', 'Ya existe un usuario con ese correo.');
+  end if;
+
+  -- Sin indicacion explicita: atiende quien tiene el rol clinico.
+  v_atiende := coalesce(p_atiende, p_rol = 'fisioterapeuta');
+
+  v_id := gen_random_uuid();
+
+  insert into auth.users (
+    instance_id, id, aud, role, email, encrypted_password,
+    email_confirmed_at, raw_app_meta_data, raw_user_meta_data,
+    created_at, updated_at,
+    confirmation_token, recovery_token, email_change, email_change_token_new
+  ) values (
+    '00000000-0000-0000-0000-000000000000', v_id, 'authenticated', 'authenticated',
+    v_email, crypt(p_clave, gen_salt('bf')),
+    now(),
+    '{"provider":"email","providers":["email"]}'::jsonb,
+    jsonb_build_object('nombre_completo', v_nombre),
+    now(), now(), '', '', '', ''
+  );
+
+  insert into auth.identities (
+    id, user_id, provider_id, identity_data, provider,
+    last_sign_in_at, created_at, updated_at
+  ) values (
+    gen_random_uuid(), v_id, v_id::text,
+    jsonb_build_object('sub', v_id::text, 'email', v_email,
+                       'email_verified', true, 'phone_verified', false),
+    'email', now(), now(), now()
+  );
+
+  insert into public.perfiles (
+    id, nombre_completo, rol, email, telefono, colegiado, especialidad,
+    color_agenda, atiende
+  ) values (
+    v_id, v_nombre, p_rol, v_email,
+    nullif(btrim(coalesce(p_telefono, '')), ''),
+    nullif(btrim(coalesce(p_colegiado, '')), ''),
+    nullif(btrim(coalesce(p_especialidad, '')), ''),
+    coalesce(p_color, '#0d9488'),
+    v_atiende
+  );
+
+  perform public.registrar_auditoria(
+    'cambiar_rol', 'perfiles', v_id::text, null,
+    format('Alta de usuario %s con rol %s', v_email, p_rol),
+    null, jsonb_build_object('email', v_email, 'rol', p_rol, 'atiende', v_atiende));
+
+  return jsonb_build_object('ok', true, 'usuario_id', v_id, 'email', v_email,
+                            'atiende', v_atiende);
+end;
+$$;
+
+comment on function public.crear_usuario_personal is
+  'Alta de personal desde el panel. Solo superadmin. El paciente NUNCA pasa por aqui.';
+
+-- ----------------------------------------------------------------------------
+-- Privilegios
+-- ----------------------------------------------------------------------------
+
+revoke execute on function public.puede_atender(uuid) from public, anon;
+revoke execute on function public.atiendo()           from public, anon;
+revoke execute on function public.crear_usuario_personal(
+  text, text, text, public.rol_usuario, text, text, text, text, boolean) from public, anon;
+
+grant execute on function public.puede_atender(uuid) to authenticated;
+grant execute on function public.atiendo()           to authenticated;
+grant execute on function public.crear_usuario_personal(
+  text, text, text, public.rol_usuario, text, text, text, text, boolean) to authenticated;
+grant execute on function public.confirmar_cita(uuid, timestamptz, uuid, int, text, text) to authenticated;
+grant execute on function public.asignar_fisioterapeuta(uuid, uuid) to authenticated;
+grant execute on function public.marcar_asistencia(uuid, boolean) to authenticated;
 
 -- ####################  seed.sql  ####################
 
@@ -3970,22 +5580,23 @@ on conflict (codigo) do nothing;
 -- ----------------------------------------------------------------------------
 -- Tratamientos
 -- ----------------------------------------------------------------------------
+-- Sin precio a proposito: varia por caso y se escribe al aplicarlo en la sesion.
 
-insert into public.tratamientos (codigo, nombre, descripcion, duracion_min, precio, requiere_nota) values
-  ('EVAL',   'Evaluacion inicial',        'Valoracion completa, historia clinica y plan de tratamiento', 60, 200.00, true),
-  ('TMAN',   'Terapia manual',            'Movilizacion articular y tecnicas de tejido blando',          45, 175.00, false),
-  ('MASO',   'Masaje descontracturante',  'Masaje terapeutico profundo',                                40, 150.00, false),
-  ('ELEC',   'Electroterapia',            'TENS / corrientes analgesicas',                              20,  75.00, false),
-  ('ULTR',   'Ultrasonido terapeutico',   'Ultrasonido para tejidos profundos',                         15,  70.00, false),
-  ('LASE',   'Laserterapia',              'Laser de baja potencia',                                     15,  90.00, false),
-  ('PSEC',   'Puncion seca',              'Tratamiento de puntos gatillo miofasciales',                 30, 200.00, true),
-  ('EJER',   'Ejercicio terapeutico',     'Programa supervisado de fortalecimiento y movilidad',        45, 160.00, false),
-  ('VNM',    'Vendaje neuromuscular',     'Aplicacion de kinesiotape',                                  15,  80.00, false),
-  ('CRIO',   'Crioterapia',               'Aplicacion de frio local',                                   15,  50.00, false),
-  ('TERM',   'Termoterapia',              'Compresas humedo-calientes / parafina',                      15,  50.00, false),
-  ('TRAC',   'Traccion',                  'Traccion cervical o lumbar',                                 20, 110.00, false),
-  ('RESP',   'Fisioterapia respiratoria', 'Tecnicas de higiene bronquial y reeducacion respiratoria',   40, 190.00, true),
-  ('DREN',   'Drenaje linfatico',         'Drenaje linfatico manual',                                   50, 210.00, false)
+insert into public.tratamientos (codigo, nombre, descripcion, duracion_min, requiere_nota) values
+  ('EVAL',   'Evaluacion inicial',        'Valoracion completa, historia clinica y plan de tratamiento', 60, true),
+  ('TMAN',   'Terapia manual',            'Movilizacion articular y tecnicas de tejido blando',          45, false),
+  ('MASO',   'Masaje descontracturante',  'Masaje terapeutico profundo',                                40, false),
+  ('ELEC',   'Electroterapia',            'TENS / corrientes analgesicas',                              20, false),
+  ('ULTR',   'Ultrasonido terapeutico',   'Ultrasonido para tejidos profundos',                         15, false),
+  ('LASE',   'Laserterapia',              'Laser de baja potencia',                                     15, false),
+  ('PSEC',   'Puncion seca',              'Tratamiento de puntos gatillo miofasciales',                 30, true),
+  ('EJER',   'Ejercicio terapeutico',     'Programa supervisado de fortalecimiento y movilidad',        45, false),
+  ('VNM',    'Vendaje neuromuscular',     'Aplicacion de kinesiotape',                                  15, false),
+  ('CRIO',   'Crioterapia',               'Aplicacion de frio local',                                   15, false),
+  ('TERM',   'Termoterapia',              'Compresas humedo-calientes / parafina',                      15, false),
+  ('TRAC',   'Traccion',                  'Traccion cervical o lumbar',                                 20, false),
+  ('RESP',   'Fisioterapia respiratoria', 'Tecnicas de higiene bronquial y reeducacion respiratoria',   40, true),
+  ('DREN',   'Drenaje linfatico',         'Drenaje linfatico manual',                                   50, false)
 on conflict (codigo) do nothing;
 
 -- ----------------------------------------------------------------------------
@@ -4009,16 +5620,41 @@ where not exists (
 );
 
 
+-- ----------------------------------------------------------------------------
+-- Inventario inicial
+-- ----------------------------------------------------------------------------
+-- Existencia en cero: se carga registrando movimientos de entrada, para que la
+-- bitacora cuadre desde el primer dia.
+
+insert into public.inventario_articulos (codigo, nombre, descripcion, categoria, unidad, minimo, ubicacion) values
+  ('INS-ELEC', 'Electrodos autoadhesivos',  'Para TENS / electroestimulacion',      'insumo',      'par',    10, 'Bodega'),
+  ('INS-GEL',  'Gel conductor',             'Para ultrasonido y electroterapia',     'insumo',      'frasco',  4, 'Bodega'),
+  ('INS-KT',   'Kinesiotape',               'Rollo de vendaje neuromuscular',        'insumo',      'rollo',   6, 'Bodega'),
+  ('INS-PAP',  'Papel para camilla',        'Rollo desechable',                      'insumo',      'rollo',   8, 'Bodega'),
+  ('INS-ALG',  'Algodon',                   'Bolsa',                                 'insumo',      'bolsa',   3, 'Bodega'),
+  ('INS-GUA',  'Guantes de nitrilo',        'Caja de 100 unidades',                  'insumo',      'caja',    4, 'Bodega'),
+  ('INS-VEN',  'Venda elastica',            'Venda de compresion',                   'insumo',      'unidad', 10, 'Bodega'),
+  ('INS-PAR',  'Parafina',                  'Bloque para termoterapia',              'insumo',      'kg',      2, 'Bodega'),
+  ('LIM-DES',  'Desinfectante de superficies', 'Galon',                              'limpieza',    'galon',   2, 'Bodega'),
+  ('LIM-ALC',  'Alcohol en gel',            'Dispensador',                           'limpieza',    'litro',   3, 'Recepcion'),
+  ('EQU-TENS', 'Equipo TENS',               'Electroestimulador portatil',           'equipo',      'unidad',  1, 'Consultorio 1'),
+  ('EQU-ULT',  'Equipo de ultrasonido',     'Ultrasonido terapeutico',               'equipo',      'unidad',  1, 'Consultorio 1'),
+  ('EQU-BAN',  'Bandas elasticas',          'Juego de resistencias',                 'equipo',      'juego',   2, 'Gimnasio'),
+  ('PAP-CONS', 'Hojas de consentimiento',   'Formato impreso',                       'papeleria',   'unidad', 25, 'Recepcion')
+on conflict (codigo) do nothing;
+
 -- ============================================================================
 --  QUE SIGUE (no se ejecuta solo: hay que editarlo)
 -- ----------------------------------------------------------------------------
 --  1. Cree su usuario en  Authentication → Users → Add user
 --     (marque "Auto Confirm User" para no tener que confirmar el correo).
 --
---  2. Copie el UUID que le asigno y descomente esto, cambiando los tres valores:
+--  2. Copie el UUID que le asigno y descomente esto, cambiando los tres valores.
+--     `atiende` en true si ademas de administrar usted pasa consulta: asi
+--     aparece en la agenda y puede firmar notas clinicas.
 --
---     insert into public.perfiles (id, nombre_completo, rol, email)
---     values ('PEGUE-AQUI-EL-UUID', 'Miguel Cabrera', 'superadmin', 'su@correo.com');
+--     insert into public.perfiles (id, nombre_completo, rol, email, atiende)
+--     values ('PEGUE-AQUI-EL-UUID', 'Miguel Cabrera', 'superadmin', 'su@correo.com', true);
 --
 --  3. Cuando publique el sitio, ajuste la URL base de los enlaces que se le
 --     envian al paciente (si queda en localhost, esos enlaces no sirven):
@@ -4028,7 +5664,7 @@ where not exists (
 --      where clave = 'url_publica';
 -- ============================================================================
 
--- Verificacion rapida: deberia devolver 24 tablas, todas con RLS activado.
+-- Verificacion rapida: las dos cifras deben ser iguales (todas las tablas con RLS).
 select count(*) filter (where rowsecurity)      as tablas_con_rls,
        count(*)                                  as tablas_totales
 from pg_tables

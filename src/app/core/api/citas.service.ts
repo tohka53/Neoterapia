@@ -75,14 +75,15 @@ export class CitasService {
     return (data ?? []) as EventoAgenda[];
   }
 
-  confirmar(citaId: string, inicioIso: string, fisioterapeutaId: string, opciones: {
+  /** El fisioterapeuta es opcional: se puede asignar después. */
+  confirmar(citaId: string, inicioIso: string, fisioterapeutaId: string | null, opciones: {
     duracionMin?: number; consultorio?: string | null; nota?: string | null;
   } = {}) {
     return this.sb.rpc<{ ok: boolean; error?: string; mensaje?: string; enlaces?: Record<string, string> }>(
       'confirmar_cita', {
         p_cita_id: citaId,
         p_inicio: inicioIso,
-        p_fisioterapeuta_id: fisioterapeutaId,
+        p_fisioterapeuta_id: fisioterapeutaId || null,
         p_duracion_min: opciones.duracionMin ?? null,
         p_consultorio: opciones.consultorio ?? null,
         p_nota: opciones.nota ?? null,
@@ -106,14 +107,21 @@ export class CitasService {
       'reprogramar_cita', {
         p_cita_id: citaId,
         p_nuevo_inicio: nuevoInicioIso,
-        p_fisioterapeuta_id: fisioterapeutaId,
+        p_fisioterapeuta_id: fisioterapeutaId || null,
         p_motivo: motivo,
         p_duracion_min: null,
       });
   }
 
+  asignarFisioterapeuta(citaId: string, fisioterapeutaId: string | null) {
+    return this.sb.rpc<{ ok: boolean; error?: string; mensaje?: string }>(
+      'asignar_fisioterapeuta', {
+        p_cita_id: citaId, p_fisioterapeuta_id: fisioterapeutaId || null,
+      });
+  }
+
   marcarAsistencia(citaId: string, asistio: boolean) {
-    return this.sb.rpc<{ ok: boolean; estado: EstadoCita; sesion_id?: string }>(
+    return this.sb.rpc<{ ok: boolean; estado?: EstadoCita; sesion_id?: string; error?: string; mensaje?: string }>(
       'marcar_asistencia', { p_cita_id: citaId, p_asistio: asistio });
   }
 

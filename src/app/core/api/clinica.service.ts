@@ -78,9 +78,14 @@ export class ClinicaService {
 
   // --- Tratamientos aplicados --------------------------------------------
 
-  async agregarTratamiento(sesionId: string, tratamientoId: string, cantidad = 1, notas?: string) {
+  /** El precio ya no viene del catálogo: se escribe al aplicar el tratamiento. */
+  async agregarTratamiento(
+    sesionId: string, tratamientoId: string, cantidad = 1,
+    precio = 0, notas?: string,
+  ) {
     const { error } = await this.sb.desde('sesion_tratamientos').insert({
-      sesion_id: sesionId, tratamiento_id: tratamientoId, cantidad, notas: notas ?? null,
+      sesion_id: sesionId, tratamiento_id: tratamientoId, cantidad,
+      precio_aplicado: precio, notas: notas ?? null,
     });
     if (error) throw error;
   }

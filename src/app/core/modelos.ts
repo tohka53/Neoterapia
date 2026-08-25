@@ -36,6 +36,11 @@ export interface Perfil {
   especialidad: string | null;
   color_agenda: string;
   activo: boolean;
+  /**
+   * Pasa consulta. Es independiente del rol: un superadministrador que atiende
+   * aparece en la agenda y firma notas; un fisioterapeuta lo tiene siempre.
+   */
+  atiende: boolean;
 }
 
 export interface AreaCuerpo {
@@ -210,13 +215,13 @@ export interface SesionDetalle extends Sesion {
   total_tratamientos: number;
 }
 
+/** Sin precio: varía por caso y se escribe al aplicarlo en la sesión. */
 export interface Tratamiento {
   id: string;
   codigo: string;
   nombre: string;
   descripcion: string | null;
   duracion_min: number;
-  precio: number;
   requiere_nota: boolean;
   activo: boolean;
 }
@@ -309,6 +314,19 @@ export interface MetricasTablero {
   mensajes_en_cola: number;
 }
 
+/** Un mapa corporal completo en un instante: la solicitud o una sesión. */
+export interface MomentoMapa {
+  momento_id: string;
+  momento_tipo: 'solicitud' | 'sesion';
+  fecha: string;
+  etiqueta: string;
+  firmada: boolean | null;
+  responsable: string | null;
+  dolor_promedio: number | null;
+  dolor_maximo: number | null;
+  areas: AreaMarcada[];
+}
+
 export interface PuntoEvolucion {
   area_codigo: string;
   area_nombre: string;
@@ -343,4 +361,66 @@ export const ETIQUETAS_ALERTA: Record<TipoAlerta, string> = {
   dpi_sospechoso: 'DPI sospechoso',
   contacto_cambiado: 'Contacto distinto al de la ficha',
   solicitud_sospechosa: 'Solicitud sospechosa',
+};
+
+
+// ---------------------------------------------------------------------------
+// Inventario
+// ---------------------------------------------------------------------------
+
+export type CategoriaArticulo =
+  | 'insumo' | 'equipo' | 'medicamento' | 'limpieza' | 'papeleria' | 'otro';
+
+export type TipoMovimiento = 'entrada' | 'salida' | 'merma' | 'ajuste';
+
+export interface ArticuloInventario {
+  id: string;
+  codigo: string;
+  nombre: string;
+  descripcion: string | null;
+  categoria: CategoriaArticulo;
+  unidad: string;
+  /** La calcula el trigger de movimientos; nunca se edita a mano. */
+  existencia: number;
+  minimo: number;
+  ubicacion: string | null;
+  activo: boolean;
+  creado_en: string;
+  bajo_minimo: boolean;
+  agotado: boolean;
+  ultimo_movimiento: string | null;
+  ultimo_tipo: TipoMovimiento | null;
+  creado_por_nombre: string | null;
+}
+
+export interface MovimientoInventario {
+  id: string;
+  articulo_id: string;
+  tipo: TipoMovimiento;
+  cantidad: number;
+  existencia_anterior: number;
+  existencia_resultante: number;
+  motivo: string | null;
+  referencia: string | null;
+  creado_en: string;
+  articulo_codigo: string;
+  articulo_nombre: string;
+  unidad: string;
+  responsable: string | null;
+}
+
+export const ETIQUETAS_CATEGORIA: Record<CategoriaArticulo, string> = {
+  insumo: 'Insumo',
+  equipo: 'Equipo',
+  medicamento: 'Medicamento',
+  limpieza: 'Limpieza',
+  papeleria: 'Papelería',
+  otro: 'Otro',
+};
+
+export const ETIQUETAS_MOVIMIENTO: Record<TipoMovimiento, string> = {
+  entrada: 'Entrada',
+  salida: 'Salida',
+  merma: 'Merma',
+  ajuste: 'Ajuste por conteo',
 };

@@ -173,7 +173,7 @@ import { Cargando } from '../shared/ui';
                 <input id="fecha" class="campo" type="date"
                        [min]="fechaMin" [max]="fechaMax"
                        [value]="fecha()" (change)="elegirFecha($event)">
-                @if (fecha()) { <p class="ayuda capitalize">{{ fechaBonita() }}</p> }
+                @if (fecha()) { <p class="ayuda first-letter:uppercase">{{ fechaBonita() }}</p> }
               </div>
 
               @if (fecha()) {

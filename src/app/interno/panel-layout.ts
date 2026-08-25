@@ -80,6 +80,11 @@ interface Entrada {
             <a routerLink="/panel/clave" class="btn-fantasma btn-sm flex-1">Contraseña</a>
             <button type="button" class="btn-fantasma btn-sm flex-1" (click)="salir()">Salir</button>
           </div>
+          <p class="mt-2 px-2 text-[11px] text-slate-400">
+            Desarrollado por
+            <a href="https://www.techsolutionsgt.dev/" target="_blank" rel="noopener"
+               class="hover:text-marca-700">TechSolutions GT</a>
+          </p>
         </div>
       </aside>
 
@@ -121,6 +126,15 @@ export class PanelLayout {
     {
       ruta: '/panel/pagos', etiqueta: 'Pagos', visible: () => this.auth.veFinanzas(),
       icono: 'M3 10h18M3 8a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8Zm4 8h4',
+    },
+    {
+      ruta: '/panel/indicadores', etiqueta: 'Indicadores', visible: () => this.auth.veFinanzas(),
+      icono: 'M3 3v16a2 2 0 0 0 2 2h16M7 15l3.5-4 3 2.5L21 7',
+    },
+    {
+      ruta: '/panel/inventario', etiqueta: 'Inventario', visible: () => true,
+      contador: () => this.metricas()['inventario_bajo'] ?? 0,
+      icono: 'M20 7 12 3 4 7m16 0-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4',
     },
     {
       ruta: '/panel/alertas', etiqueta: 'Alertas', visible: () => this.auth.veFinanzas(),

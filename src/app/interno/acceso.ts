@@ -55,6 +55,11 @@ import { AvisosService } from '../core/util/avisos.service';
           <p class="mt-10 text-xs text-slate-400">
             <a routerLink="/" class="hover:text-slate-600">← Volver al sitio público</a>
           </p>
+          <p class="mt-6 text-xs text-slate-400">
+            Desarrollado por
+            <a href="https://www.techsolutionsgt.dev/" target="_blank" rel="noopener"
+               class="font-medium text-slate-500 hover:text-marca-700">TechSolutions GT</a>
+          </p>
         </div>
       </div>
 

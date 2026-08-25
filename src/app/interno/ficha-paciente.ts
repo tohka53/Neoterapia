@@ -6,8 +6,8 @@ import { CitasService } from '../core/api/citas.service';
 import { ClinicaService } from '../core/api/clinica.service';
 import { PacientesService } from '../core/api/pacientes.service';
 import {
-  Alerta, AreaMarcada, CitaListado, ETIQUETAS_ALERTA, PacienteListado, Pago, Perfil,
-  PuntoEvolucion, SesionDetalle,
+  Alerta, AreaMarcada, CitaListado, ETIQUETAS_ALERTA, MetodoPago, MomentoMapa,
+  PacienteListado, Pago, Perfil, PuntoEvolucion, SesionDetalle,
 } from '../core/modelos';
 import { AvisosService } from '../core/util/avisos.service';
 import {
@@ -285,86 +285,204 @@ type Pestana = 'resumen' | 'citas' | 'clinico' | 'evolucion' | 'pagos' | 'identi
 
         <!-- ---------- Evolución ---------- -->
         @if (pestana() === 'evolucion') {
-          <div class="grid gap-5 lg:grid-cols-2">
-            <section class="tarjeta tarjeta-cuerpo">
-              <h2 class="font-semibold mb-1">Mapa corporal</h2>
-              <p class="text-sm text-slate-500 mb-4">
-                Estado más reciente de cada zona. El número es el nivel de dolor 0-10.
-              </p>
-              @if (areasCatalogo().length) {
-                <app-mapa-corporal [areas]="areasCatalogo()" [seleccion]="mapaActual()" modo="lectura" />
-              } @else { <app-cargando /> }
-            </section>
-
-            <section class="tarjeta tarjeta-cuerpo">
-              <h2 class="font-semibold mb-1">Evolución del dolor</h2>
-              <p class="text-sm text-slate-500 mb-4">Por zona, de la primera a la última medición.</p>
-
-              @if (evolucionPorArea().length === 0) {
-                <app-vacio titulo="Todavía no hay mediciones" />
-              } @else {
-                <div class="space-y-4">
-                  @for (a of evolucionPorArea(); track a.codigo) {
-                    <div>
-                      <div class="flex items-center justify-between text-sm mb-1.5">
-                        <span class="font-medium">{{ a.nombre }}</span>
-                        <span class="text-xs" [class]="a.mejora > 0 ? 'text-emerald-600' : a.mejora < 0 ? 'text-rose-600' : 'text-slate-400'">
-                          {{ a.primero }} → {{ a.ultimo }}
-                          @if (a.mejora > 0) { <span>({{ a.mejora }} menos)</span> }
-                          @if (a.mejora < 0) { <span>({{ -a.mejora }} más)</span> }
-                        </span>
-                      </div>
-                      <div class="flex items-end gap-1 h-14">
-                        @for (p of a.puntos; track $index) {
-                          <div class="flex-1 rounded-t transition-all min-w-1.5"
-                               [style.height.%]="Math.max(p.nivel_dolor * 10, 6)"
-                               [style.background]="color(p.nivel_dolor)"
-                               [title]="fecha(p.fecha) + ' · ' + p.nivel_dolor + '/10'"></div>
-                        }
-                      </div>
+          @if (momentos().length === 0) {
+            <div class="tarjeta">
+              <app-vacio titulo="Todavía no hay mapas registrados"
+                         detalle="El primero se crea con la solicitud del paciente; los siguientes, en cada sesión." />
+            </div>
+          } @else {
+            <!-- Línea de tiempo -->
+            <div class="tarjeta tarjeta-cuerpo mb-5">
+              <div class="flex items-baseline justify-between gap-4 mb-3">
+                <h2 class="font-semibold">Historial del mapa corporal</h2>
+                <span class="text-sm text-slate-500">
+                  {{ momentos().length }} registro{{ momentos().length > 1 ? 's' : '' }}
+                </span>
+              </div>
+              <div class="flex gap-2 overflow-x-auto pb-2">
+                @for (m of momentos(); track m.momento_id; let i = $index) {
+                  <button type="button"
+                          class="shrink-0 w-40 rounded-lg ring-1 px-3 py-2.5 text-left transition-colors"
+                          [class]="indiceSel() === i
+                            ? 'bg-marca-50 ring-marca-500'
+                            : 'bg-white ring-slate-200 hover:bg-slate-50'"
+                          (click)="indiceSel.set(i)">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-xs font-medium"
+                            [class]="m.momento_tipo === 'solicitud' ? 'text-slate-500' : 'text-marca-700'">
+                        {{ m.momento_tipo === 'solicitud' ? 'Solicitud' : 'Sesión ' + numeroSesion(i) }}
+                      </span>
+                      @if (i === momentos().length - 1) {
+                        <span class="chip-neutro text-[10px]">Actual</span>
+                      }
                     </div>
-                  }
-                </div>
-              }
-            </section>
-          </div>
+                    <p class="text-sm font-semibold mt-0.5">{{ fecha(m.fecha) }}</p>
+                    <div class="flex items-center gap-1.5 mt-1.5">
+                      <span class="w-2.5 h-2.5 rounded-full shrink-0"
+                            [style.background]="color(m.dolor_maximo)"></span>
+                      <span class="text-xs text-slate-500">
+                        máx {{ m.dolor_maximo }}/10 · {{ m.areas.length }} zona{{ m.areas.length > 1 ? 's' : '' }}
+                      </span>
+                    </div>
+                  </button>
+                }
+              </div>
+            </div>
+
+            <div class="grid gap-5 lg:grid-cols-2">
+              <!-- Mapa del momento seleccionado -->
+              <section class="tarjeta tarjeta-cuerpo">
+                @if (momentoSel(); as m) {
+                  <div class="flex items-start justify-between gap-3 mb-1">
+                    <div>
+                      <h2 class="font-semibold">
+                        {{ m.momento_tipo === 'solicitud' ? 'Lo que marcó el paciente' : 'Registro de la sesión' }}
+                      </h2>
+                      <p class="text-sm text-slate-500 mt-0.5">
+                        {{ fechaYHora(m.fecha) }}
+                        @if (m.responsable) { · {{ m.responsable }} }
+                        @if (m.firmada === false) {
+                          <span class="chip bg-amber-50 text-amber-800 ring-amber-200 ml-1.5">Borrador</span>
+                        }
+                      </p>
+                    </div>
+                    <div class="flex gap-1 shrink-0">
+                      <button type="button" class="btn-secundario btn-sm" [disabled]="indiceSel() === 0"
+                              (click)="indiceSel.set(indiceSel() - 1)" aria-label="Anterior">‹</button>
+                      <button type="button" class="btn-secundario btn-sm"
+                              [disabled]="indiceSel() >= momentos().length - 1"
+                              (click)="indiceSel.set(indiceSel() + 1)" aria-label="Siguiente">›</button>
+                    </div>
+                  </div>
+
+                  @if (areasCatalogo().length) {
+                    <app-mapa-corporal [areas]="areasCatalogo()" [seleccion]="m.areas" modo="lectura" />
+                  } @else { <app-cargando /> }
+
+                  <ul class="mt-4 space-y-1.5">
+                    @for (a of m.areas; track a.codigo) {
+                      <li class="flex items-center gap-2.5 text-sm">
+                        <span class="w-3 h-3 rounded-full shrink-0"
+                              [style.background]="color(a.nivel_dolor)"></span>
+                        <span class="flex-1">{{ a.nombre }}</span>
+                        @if (a.movilidad) {
+                          <span class="chip-neutro text-[10px]">{{ textoMovilidad(a.movilidad) }}</span>
+                        }
+                        @if (a.inflamacion) {
+                          <span class="chip bg-rose-50 text-rose-800 ring-rose-200 text-[10px]">Inflamación</span>
+                        }
+                        <span class="font-semibold tabular-nums text-xs">{{ a.nivel_dolor }}/10</span>
+                      </li>
+                    }
+                  </ul>
+                }
+              </section>
+
+              <!-- Comparación y tendencia -->
+              <section class="tarjeta tarjeta-cuerpo">
+                <h2 class="font-semibold mb-1">Evolución del dolor</h2>
+                <p class="text-sm text-slate-500 mb-4">
+                  Por zona, de la primera a la última medición. La barra resaltada es el
+                  momento que está viendo.
+                </p>
+
+                @if (evolucionPorArea().length === 0) {
+                  <app-vacio titulo="Todavía no hay suficientes mediciones" />
+                } @else {
+                  <div class="space-y-4">
+                    @for (a of evolucionPorArea(); track a.codigo) {
+                      <div>
+                        <div class="flex items-center justify-between text-sm mb-1.5">
+                          <span class="font-medium">{{ a.nombre }}</span>
+                          <span class="text-xs" [class]="a.mejora > 0 ? 'text-emerald-600'
+                                                        : a.mejora < 0 ? 'text-rose-600' : 'text-slate-400'">
+                            {{ a.primero }} → {{ a.ultimo }}
+                            @if (a.mejora > 0) { <span>({{ a.mejora }} menos)</span> }
+                            @if (a.mejora < 0) { <span>({{ -a.mejora }} más)</span> }
+                          </span>
+                        </div>
+                        <div class="flex items-end gap-1 h-14">
+                          @for (p of a.puntos; track $index) {
+                            <div class="flex-1 rounded-t transition-all min-w-1.5"
+                                 [style.height.%]="Math.max(p.nivel_dolor * 10, 6)"
+                                 [style.background]="color(p.nivel_dolor)"
+                                 [style.opacity]="mismoMomento(p.fecha) ? 1 : 0.4"
+                                 [title]="fecha(p.fecha) + ' · ' + p.nivel_dolor + '/10'"></div>
+                          }
+                        </div>
+                      </div>
+                    }
+                  </div>
+                }
+              </section>
+            </div>
+          }
         }
 
         <!-- ---------- Pagos ---------- -->
         @if (pestana() === 'pagos' && auth.veFinanzas()) {
           <div class="tarjeta overflow-hidden">
-            <header class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
-              <h2 class="font-semibold">Pagos</h2>
-              @if (saldo(); as s) {
-                <div class="text-sm text-right">
-                  <span class="text-slate-500">Cargos {{ dinero(s.total_cargos) }} ·
-                  Pagado {{ dinero(s.total_pagado) }} ·</span>
-                  <strong [class.text-rose-600]="s.saldo > 0"> Saldo {{ dinero(s.saldo) }}</strong>
-                </div>
-              }
+            <header class="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 class="font-semibold">Pagos</h2>
+                @if (saldo(); as s) {
+                  <p class="text-sm text-slate-500 mt-0.5">
+                    Cargos {{ dinero(s.total_cargos) }} · Pagado {{ dinero(s.total_pagado) }} ·
+                    <strong [class.text-rose-600]="s.saldo > 0"
+                            [class.text-emerald-700]="s.saldo <= 0">
+                      Saldo {{ dinero(s.saldo) }}
+                    </strong>
+                  </p>
+                }
+              </div>
+              <button type="button" class="btn-primario btn-sm" (click)="abrirPago()">
+                Registrar pago
+              </button>
             </header>
+
             @if (pagos().length === 0) {
-              <app-vacio titulo="Sin pagos registrados" />
+              <app-vacio titulo="Sin pagos registrados"
+                         detalle="Los cobros de este paciente aparecerán aquí." />
             } @else {
-              <table class="tabla">
-                <thead><tr><th>Fecha</th><th>Concepto</th><th>Método</th>
-                  <th class="text-right">Monto</th><th>Estado</th></tr></thead>
-                <tbody>
-                  @for (p of pagos(); track p.id) {
-                    <tr>
-                      <td class="whitespace-nowrap">{{ fecha(p.fecha) }}</td>
-                      <td class="text-sm">{{ p.descripcion ?? p.referencia ?? '—' }}</td>
-                      <td class="text-sm capitalize">{{ p.metodo }}</td>
-                      <td class="text-right tabular-nums font-medium">{{ dinero(p.monto) }}</td>
-                      <td>
-                        <span class="chip" [class]="p.estado === 'pagado'
-                          ? 'bg-emerald-50 text-emerald-800 ring-emerald-200'
-                          : 'bg-slate-100 text-slate-600 ring-slate-300'">{{ p.estado }}</span>
-                      </td>
-                    </tr>
-                  }
-                </tbody>
-              </table>
+              <div class="overflow-x-auto">
+                <table class="tabla">
+                  <thead><tr>
+                    <th>Fecha</th><th>Concepto</th><th>Método</th>
+                    <th class="text-right">Monto</th><th>Estado</th><th></th>
+                  </tr></thead>
+                  <tbody>
+                    @for (p of pagos(); track p.id) {
+                      <tr [class.opacity-50]="p.estado === 'anulado'">
+                        <td class="whitespace-nowrap">{{ fecha(p.fecha) }}</td>
+                        <td class="text-sm">
+                          {{ p.descripcion ?? p.referencia ?? '—' }}
+                          @if (p.cita_id) {
+                            <span class="block text-xs text-slate-400">
+                              {{ codigoDeCita(p.cita_id) }}
+                            </span>
+                          }
+                          @if (p.motivo_anulacion) {
+                            <span class="block text-xs text-rose-600">{{ p.motivo_anulacion }}</span>
+                          }
+                        </td>
+                        <td class="text-sm capitalize">{{ p.metodo }}</td>
+                        <td class="text-right tabular-nums font-medium">{{ dinero(p.monto) }}</td>
+                        <td>
+                          <span class="chip" [class]="p.estado === 'pagado'
+                            ? 'bg-emerald-50 text-emerald-800 ring-emerald-200'
+                            : 'bg-slate-100 text-slate-600 ring-slate-300'">{{ p.estado }}</span>
+                        </td>
+                        <td class="text-right">
+                          @if (p.estado === 'pagado') {
+                            <button type="button" class="btn-fantasma btn-sm"
+                                    (click)="abrirAnular(p)">Anular</button>
+                          }
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
             }
           </div>
         }
@@ -484,6 +602,100 @@ type Pestana = 'resumen' | 'citas' | 'clinico' | 'evolucion' | 'pagos' | 'identi
       </div>
     </app-dialogo>
 
+    <app-dialogo [(abierto)]="dlgPago" titulo="Registrar pago"
+                 [subtitulo]="paciente()?.nombre_completo ?? ''" ancho="lg">
+      <div class="space-y-4">
+        @if (saldo(); as sal) {
+          @if (sal.saldo > 0) {
+            <button type="button"
+                    class="w-full rounded-lg bg-slate-50 ring-1 ring-slate-200 px-4 py-3
+                           text-left hover:bg-slate-100 transition-colors"
+                    (click)="pagoMonto.set(sal.saldo)">
+              <span class="text-sm text-slate-600">Saldo pendiente</span>
+              <span class="float-right font-semibold tabular-nums text-rose-600">
+                {{ dinero(sal.saldo) }}
+              </span>
+              <span class="block text-xs text-slate-400 mt-0.5">Toque para usar este monto</span>
+            </button>
+          }
+        }
+
+        <div class="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label class="etiqueta" for="pg-monto">Monto (GTQ)</label>
+            <input id="pg-monto" class="campo" type="number" min="0.01" step="0.01"
+                   [class.campo-error]="pagoMonto() < 0"
+                   [value]="pagoMonto()" (input)="pagoMonto.set(+$any($event.target).value)">
+          </div>
+          <div>
+            <label class="etiqueta" for="pg-met">Método</label>
+            <select id="pg-met" class="campo" [value]="pagoMetodo()"
+                    (change)="pagoMetodo.set($any($event.target).value)">
+              @for (m of metodosPago; track m) { <option [value]="m">{{ m }}</option> }
+            </select>
+          </div>
+          <div class="sm:col-span-2">
+            <label class="etiqueta" for="pg-cita">Cita relacionada (opcional)</label>
+            <select id="pg-cita" class="campo" [value]="pagoCita()"
+                    (change)="pagoCita.set($any($event.target).value)">
+              <option value="">Sin ligar a una cita</option>
+              @for (c of citasCobrables(); track c.id) {
+                <option [value]="c.id">
+                  {{ c.inicio_programado ? fecha(c.inicio_programado) : fecha(c.fecha_solicitada + 'T12:00:00') }}
+                  — {{ c.codigo_referencia }} ({{ c.estado }})
+                </option>
+              }
+            </select>
+            <p class="ayuda">Ligarlo ayuda a saber qué visita se cobró.</p>
+          </div>
+          <div>
+            <label class="etiqueta" for="pg-ref">Referencia / boleta</label>
+            <input id="pg-ref" class="campo" [value]="pagoReferencia()"
+                   (input)="pagoReferencia.set($any($event.target).value)">
+          </div>
+          <div>
+            <label class="etiqueta" for="pg-desc">Concepto</label>
+            <input id="pg-desc" class="campo" placeholder="Ej. sesión de terapia manual"
+                   [value]="pagoDescripcion()" (input)="pagoDescripcion.set($any($event.target).value)">
+          </div>
+        </div>
+
+        <p class="rounded-lg bg-slate-50 ring-1 ring-slate-200 px-3 py-2.5 text-xs text-slate-600">
+          Un pago aplicado no se edita: si se equivoca, se anula y se registra otro.
+          Queda el rastro de ambos.
+        </p>
+
+        @if (errorPago()) {
+          <p class="rounded-lg bg-rose-50 ring-1 ring-rose-200 px-3 py-2 text-sm text-rose-800">
+            {{ errorPago() }}
+          </p>
+        }
+      </div>
+      <div acciones class="flex justify-end gap-2">
+        <button type="button" class="btn-secundario" (click)="dlgPago.set(false)">Cancelar</button>
+        <button type="button" class="btn-primario" [disabled]="pagoMonto() <= 0 || guardando()"
+                (click)="guardarPago()">
+          {{ guardando() ? 'Registrando…' : 'Registrar pago' }}
+        </button>
+      </div>
+    </app-dialogo>
+
+    <app-dialogo [(abierto)]="dlgAnular" titulo="Anular pago"
+                 subtitulo="El movimiento queda visible, marcado como anulado">
+      <div>
+        <label class="etiqueta" for="pg-anu">Motivo</label>
+        <textarea id="pg-anu" class="campo" rows="3"
+                  (input)="motivoAnulacion.set($any($event.target).value)"
+        >{{ motivoAnulacion() }}</textarea>
+      </div>
+      <div acciones class="flex justify-end gap-2">
+        <button type="button" class="btn-secundario" (click)="dlgAnular.set(false)">Volver</button>
+        <button type="button" class="btn-peligro"
+                [disabled]="motivoAnulacion().trim().length < 3 || guardando()"
+                (click)="anularPago()">Anular</button>
+      </div>
+    </app-dialogo>
+
     <app-dialogo [(abierto)]="dlgDpi" titulo="Corregir documento"
                  subtitulo="Se conserva el historial; el cambio queda auditado">
       <div class="space-y-4">
@@ -542,6 +754,8 @@ export class FichaPaciente {
   readonly pagos = signal<Pago[]>([]);
   readonly saldo = signal<{ total_cargos: number; total_pagado: number; saldo: number } | null>(null);
   readonly evolucion = signal<PuntoEvolucion[]>([]);
+  readonly momentos = signal<MomentoMapa[]>([]);
+  readonly indiceSel = signal(0);
   readonly historial = signal<any[]>([]);
   readonly clinico = signal<Record<string, string | undefined>>({});
   readonly fisios = signal<Perfil[]>([]);
@@ -553,6 +767,20 @@ export class FichaPaciente {
   readonly dlgEditar = signal(false);
   readonly dlgDpi = signal(false);
   readonly guardando = signal(false);
+
+  // --- Pagos --------------------------------------------------------------
+  readonly metodosPago: MetodoPago[] =
+    ['efectivo', 'tarjeta', 'transferencia', 'deposito', 'otro'];
+  readonly dlgPago = signal(false);
+  readonly dlgAnular = signal(false);
+  readonly pagoMonto = signal(0);
+  readonly pagoMetodo = signal<MetodoPago>('efectivo');
+  readonly pagoCita = signal('');
+  readonly pagoReferencia = signal('');
+  readonly pagoDescripcion = signal('');
+  readonly errorPago = signal('');
+  readonly pagoAnular = signal<Pago | null>(null);
+  readonly motivoAnulacion = signal('');
   readonly edit = signal<Record<string, string | undefined>>({});
   readonly nuevoDpi = signal('');
   readonly motivoCorreccion = signal('');
@@ -577,6 +805,81 @@ export class FichaPaciente {
 
   readonly ini = computed(() => iniciales(this.paciente()?.nombre_completo));
   readonly puedeVerDpi = computed(() => this.auth.esAdmin() || this.auth.esFisio());
+
+  /** Solo tiene sentido cobrar visitas que ocurrieron o están agendadas. */
+  readonly citasCobrables = computed(() =>
+    this.citasLista().filter((c) => ['atendida', 'confirmada'].includes(c.estado)));
+
+  codigoDeCita(id: string): string {
+    return this.citasLista().find((c) => c.id === id)?.codigo_referencia ?? '';
+  }
+
+  abrirPago() {
+    const s = this.saldo();
+    this.pagoMonto.set(s && s.saldo > 0 ? Number(s.saldo) : 0);
+    this.pagoMetodo.set('efectivo');
+    // Se propone la última visita ATENDIDA: es lo que normalmente se cobra,
+    // no la cita futura que casualmente es la más reciente de la lista.
+    const cobrables = this.citasCobrables();
+    this.pagoCita.set(
+      (cobrables.find((c) => c.estado === 'atendida') ?? cobrables[0])?.id ?? '');
+    this.pagoReferencia.set('');
+    this.pagoDescripcion.set('');
+    this.errorPago.set('');
+    this.dlgPago.set(true);
+  }
+
+  async guardarPago() {
+    if (this.pagoMonto() <= 0) return;
+    this.guardando.set(true);
+    this.errorPago.set('');
+    try {
+      await this.clinica.registrarPago({
+        paciente_id: this.id(),
+        cita_id: this.pagoCita() || null,
+        monto: this.pagoMonto(),
+        metodo: this.pagoMetodo(),
+        estado: 'pagado',
+        referencia: this.pagoReferencia() || null,
+        descripcion: this.pagoDescripcion() || null,
+        registrado_por: this.auth.perfil()!.id,
+      });
+      this.avisos.exito(`Pago de ${moneda(this.pagoMonto())} registrado.`);
+      this.dlgPago.set(false);
+      await this.cargar();
+    } catch (e) {
+      this.errorPago.set(
+        e instanceof Error && /insufficient|permission/i.test(e.message)
+          ? 'Su rol no permite registrar pagos.'
+          : 'No se pudo registrar el pago.',
+      );
+      console.error(e);
+    } finally {
+      this.guardando.set(false);
+    }
+  }
+
+  abrirAnular(p: Pago) {
+    this.pagoAnular.set(p);
+    this.motivoAnulacion.set('');
+    this.dlgAnular.set(true);
+  }
+
+  async anularPago() {
+    const p = this.pagoAnular();
+    if (!p || this.motivoAnulacion().trim().length < 3) return;
+    this.guardando.set(true);
+    try {
+      await this.clinica.anularPago(p.id, this.motivoAnulacion());
+      this.avisos.exito('Pago anulado.');
+      this.dlgAnular.set(false);
+      await this.cargar();
+    } catch {
+      this.avisos.error('No se pudo anular el pago.');
+    } finally {
+      this.guardando.set(false);
+    }
+  }
 
   readonly nuevoDpiOk = computed(() => validarDpi(this.nuevoDpi()).valido);
   readonly errorNuevoDpi = computed(() => validarDpi(this.nuevoDpi()).mensaje ?? '');
@@ -608,19 +911,21 @@ export class FichaPaciente {
     ];
   });
 
-  /** Última medición conocida de cada zona, para pintar el mapa. */
-  readonly mapaActual = computed<AreaMarcada[]>(() => {
-    const ultimo = new Map<string, PuntoEvolucion>();
-    for (const p of this.evolucion()) ultimo.set(p.area_codigo, p);
-    return [...ultimo.values()].map((p) => ({
-      codigo: p.area_codigo,
-      nombre: p.area_nombre,
-      vista: p.vista,
-      svg_x: p.svg_x,
-      svg_y: p.svg_y,
-      nivel_dolor: p.nivel_dolor,
-    }));
-  });
+  readonly momentoSel = computed(() => this.momentos()[this.indiceSel()] ?? null);
+
+  numeroSesion(indice: number): number {
+    return this.momentos().slice(0, indice + 1)
+      .filter((m) => m.momento_tipo === 'sesion').length;
+  }
+
+  /** Resalta en las barras el momento que se está viendo. */
+  mismoMomento(fecha: string): boolean {
+    return this.momentoSel()?.fecha === fecha;
+  }
+
+  textoMovilidad(m: string | null | undefined): string {
+    return { normal: 'Movilidad normal', limitada: 'Limitada', muy_limitada: 'Muy limitada' }[m ?? ''] ?? '';
+  }
 
   readonly evolucionPorArea = computed(() => {
     const grupos = new Map<string, PuntoEvolucion[]>();
@@ -660,6 +965,10 @@ export class FichaPaciente {
         this.pacientes.alertasDePaciente(id).then((a) => this.alertas.set(a.filter((x) => x.estado === 'pendiente'))),
         this.citas.listar({ pacienteId: id, limite: 100 }).then((c) => this.citasLista.set(c.reverse())),
         this.pacientes.evolucion(id).then((e) => this.evolucion.set(e)),
+        this.pacientes.historialMapa(id).then((m) => {
+          this.momentos.set(m);
+          this.indiceSel.set(Math.max(m.length - 1, 0));   // arranca en el actual
+        }),
       ];
       if (this.auth.veClinico()) {
         tareas.push(this.clinica.sesionesDePaciente(id).then((s) => this.sesiones.set(s)));

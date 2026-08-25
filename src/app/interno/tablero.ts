@@ -16,7 +16,7 @@ import { Cargando, ChipEstado, Vacio } from '../shared/ui';
         <h1 class="text-2xl font-bold tracking-tight">
           {{ saludo() }}, {{ primerNombre() }}
         </h1>
-        <p class="text-sm text-slate-500 mt-0.5 capitalize">{{ hoyTexto }}</p>
+        <p class="text-sm text-slate-500 mt-0.5 first-letter:uppercase">{{ hoyTexto }}</p>
       </header>
 
       <!-- Indicadores -->

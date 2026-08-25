@@ -213,6 +213,8 @@ begin
 end;
 $$;
 
+drop function if exists public.confirmar_cita(uuid, timestamptz, uuid, int, text, text);
+
 create or replace function public.confirmar_cita(
   p_cita_id           uuid,
   p_inicio            timestamptz,

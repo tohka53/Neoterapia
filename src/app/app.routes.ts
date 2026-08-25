@@ -88,6 +88,17 @@ export const routes: Routes = [
         title: 'Pagos · NeoTerapia',
       },
       {
+        path: 'indicadores',
+        canActivate: [guardRol('superadmin', 'admin', 'recepcion')],
+        loadComponent: () => import('./interno/indicadores').then((m) => m.Indicadores),
+        title: 'Indicadores · NeoTerapia',
+      },
+      {
+        path: 'inventario',
+        loadComponent: () => import('./interno/inventario').then((m) => m.Inventario),
+        title: 'Inventario · NeoTerapia',
+      },
+      {
         path: 'alertas',
         canActivate: [guardRol('superadmin', 'admin', 'recepcion')],
         loadComponent: () => import('./interno/alertas').then((m) => m.Alertas),

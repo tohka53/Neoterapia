@@ -238,7 +238,7 @@ import { Cargando, Dialogo, EscalaDolor, Vacio } from '../shared/ui';
                   (change)="tratSel.set($any($event.target).value)">
             <option value="">Seleccione…</option>
             @for (t of tratamientos(); track t.id) {
-              <option [value]="t.id">{{ t.nombre }} — {{ dinero(t.precio) }}</option>
+              <option [value]="t.id">{{ t.nombre }} ({{ t.duracion_min }} min)</option>
             }
           </select>
         </div>
@@ -247,6 +247,12 @@ import { Cargando, Dialogo, EscalaDolor, Vacio } from '../shared/ui';
             <label class="etiqueta" for="t-cant">Cantidad</label>
             <input id="t-cant" class="campo" type="number" min="1" max="20"
                    [value]="tratCantidad()" (input)="tratCantidad.set(+$any($event.target).value)">
+          </div>
+          <div>
+            <label class="etiqueta" for="t-pre">Monto cobrado (GTQ)</label>
+            <input id="t-pre" class="campo" type="number" min="0" step="0.01"
+                   [value]="tratPrecio()" (input)="tratPrecio.set(+$any($event.target).value)">
+            <p class="ayuda">Por unidad. Total: {{ dinero(tratPrecio() * tratCantidad()) }}</p>
           </div>
         </div>
         <div>
@@ -327,6 +333,7 @@ export class EditorSesion {
   readonly dlgAdenda = signal(false);
   readonly tratSel = signal('');
   readonly tratCantidad = signal(1);
+  readonly tratPrecio = signal(0);
   readonly tratNota = signal('');
   readonly textoAdenda = signal('');
 
@@ -434,10 +441,12 @@ export class EditorSesion {
     if (!s || !this.tratSel()) return;
     try {
       await this.clinicaApi.agregarTratamiento(
-        s.id, this.tratSel(), this.tratCantidad(), this.tratNota() || undefined,
+        s.id, this.tratSel(), this.tratCantidad(), this.tratPrecio(),
+        this.tratNota() || undefined,
       );
       this.dlgTrat.set(false);
-      this.tratSel.set(''); this.tratCantidad.set(1); this.tratNota.set('');
+      this.tratSel.set(''); this.tratCantidad.set(1);
+      this.tratPrecio.set(0); this.tratNota.set('');
       await this.cargar();
     } catch {
       this.avisos.error('No se pudo agregar el tratamiento.');
