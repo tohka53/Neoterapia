@@ -37,7 +37,7 @@ Angular 20 (standalone, signals, zoneless) + Supabase (Postgres, RLS, RPCs).
 ### 1. Base de datos
 
 **La vía rápida:** pegar `supabase/instalar.sql` completo en el SQL Editor de
-Supabase y darle Run. Contiene las 18 migraciones + el seed, es idempotente y
+Supabase y darle Run. Contiene las 19 migraciones + el seed, es idempotente y
 termina verificando que las 26 tablas queden con RLS activado. Si agrega
 migraciones, `bash supabase/generar_instalador.sh` regenera ese archivo.
 
@@ -63,6 +63,7 @@ Si prefiere migración por migración, ejecutar en orden el contenido de
 20260825121500_16_mapa_por_sesion.sql
 20260825121600_17_indicadores.sql
 20260825121700_18_quien_atiende.sql
+20260825121800_19_url_publica.sql
 ```
 
 Con la CLI de Supabase:
@@ -122,12 +123,13 @@ Los cuatro tipos de movimiento:
 En **Panel → Administración → Ajustes**, o directamente:
 
 ```sql
-update public.configuracion set valor = '"https://citas.suclinica.gt"'::jsonb
+update public.configuracion set valor = '"https://neoterapia.vercel.app"'::jsonb
  where clave = 'url_publica';
 ```
 
 `url_publica` es la base de los enlaces que se envían al paciente: si queda mal,
-los enlaces de confirmar/cancelar no funcionarán.
+los enlaces de confirmar/cancelar no funcionarán. El seed ya lo deja apuntando
+al dominio publicado; solo hay que tocarlo si mañana se cambia de dominio.
 
 ### 5. Indicadores
 
@@ -153,15 +155,24 @@ npm run build      # dist/neoterapia/browser
 
 ### 7. Despliegue en Vercel
 
+Publicado en **https://neoterapia.vercel.app**.
+
 `vercel.json` ya trae lo necesario: el `outputDirectory` correcto para el builder
 `application` de Angular y —lo importante— el *rewrite* que manda todo a
 `index.html`. Sin ese rewrite, cualquier ruta que no sea `/` da 404: el enlace
 que recibe el paciente (`/cita/confirmar?t=…`) y todo `/panel/*` incluidos.
 
+También manda `X-Robots-Tag: noindex` y `Referrer-Policy: no-referrer` en
+`/cita/*`: los enlaces de un solo uso del paciente no deben terminar indexados
+ni filtrar su token por la cabecera `Referer`. `public/robots.txt` dice lo mismo,
+pero robots.txt es una petición y la cabecera es una orden.
+
 Después de desplegar hay **tres sitios** donde ajustar la URL, y los tres importan:
 
 1. **`configuracion.url_publica`** — la base de los enlaces que se le envían al
-   paciente. Si queda en `localhost`, esos enlaces no sirven para nadie.
+   paciente. Si queda en `localhost`, esos enlaces no sirven para nadie. El seed
+   y la migración 19 ya lo dejan en el dominio publicado; esto es para cuando se
+   cambie de dominio:
 
    ```sql
    update public.configuracion set valor = '"https://neoterapia.vercel.app"'::jsonb

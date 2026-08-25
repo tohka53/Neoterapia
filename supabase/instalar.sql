@@ -3,7 +3,7 @@
 -- ----------------------------------------------------------------------------
 --  Pegue TODO este archivo en:  Supabase → SQL Editor → New query → Run
 --
---  Contiene, en orden, las 18 migraciones + los datos base (seed).
+--  Contiene, en orden, las 19 migraciones + los datos base (seed).
 --  Es idempotente: si algo falla a medio camino, corrija y vuelva a correrlo
 --  completo sin problema.
 --
@@ -1555,7 +1555,7 @@ declare
   v_asunto   text;
   v_saludo   text;
   v_cuando   text;
-  v_base     text := coalesce(public.config('url_publica') #>> '{}', 'https://neoterapia.gt');
+  v_base     text := coalesce(public.config('url_publica') #>> '{}', 'https://neoterapia.vercel.app');
   v_id       uuid;
   v_tz       text := coalesce(public.config('zona_horaria') #>> '{}', 'America/Guatemala');
 begin
@@ -2979,7 +2979,7 @@ security definer
 set search_path = public
 as $$
 declare
-  v_base   text := coalesce(public.config('url_publica') #>> '{}', 'https://neoterapia.gt');
+  v_base   text := coalesce(public.config('url_publica') #>> '{}', 'https://neoterapia.vercel.app');
   v_conf   text;
   v_canc   text;
 begin
@@ -3272,7 +3272,7 @@ as $$
 declare
   v_s     public.sesiones%rowtype;
   v_token text;
-  v_base  text := coalesce(public.config('url_publica') #>> '{}', 'https://neoterapia.gt');
+  v_base  text := coalesce(public.config('url_publica') #>> '{}', 'https://neoterapia.vercel.app');
 begin
   select * into v_s from public.sesiones where id = p_sesion_id;
   if not found then
@@ -5475,6 +5475,39 @@ grant execute on function public.confirmar_cita(uuid, timestamptz, uuid, int, te
 grant execute on function public.asignar_fisioterapeuta(uuid, uuid) to authenticated;
 grant execute on function public.marcar_asistencia(uuid, boolean) to authenticated;
 
+-- ####################  20260825121800_19_url_publica.sql  ####################
+
+-- ============================================================================
+-- NeoTerapia · 19 · La URL publica deja de ser localhost
+-- ----------------------------------------------------------------------------
+-- El sitio ya esta desplegado en https://neoterapia.vercel.app. `url_publica`
+-- es la base de TODO enlace que se le manda al paciente (confirmar, cancelar,
+-- evaluacion, calendario); mientras apunte a localhost esos enlaces no le
+-- sirven a nadie mas que al desarrollador.
+--
+-- Solo se corrige si sigue en el valor de desarrollo: si manana la clinica
+-- compra su dominio y lo cambia desde Administracion, volver a correr esta
+-- migracion no se lo pisa.
+-- ============================================================================
+
+set search_path = public, extensions;
+
+update public.configuracion
+   set valor = '"https://neoterapia.vercel.app"'::jsonb
+ where clave = 'url_publica'
+   and valor #>> '{}' in ('http://localhost:4200', 'http://localhost:4174', '', 'https://neoterapia.gt');
+
+-- Si la fila no existia (instalacion vieja sin ese seed), se crea.
+insert into public.configuracion (clave, valor, descripcion, editable_por)
+values ('url_publica', '"https://neoterapia.vercel.app"'::jsonb,
+        'Base para los enlaces enviados al paciente', 'superadmin')
+on conflict (clave) do nothing;
+
+do $$
+begin
+  raise notice 'url_publica = %', public.config('url_publica') #>> '{}';
+end $$;
+
 -- ####################  seed.sql  ####################
 
 -- ============================================================================
@@ -5488,7 +5521,7 @@ grant execute on function public.marcar_asistencia(uuid, boolean) to authenticat
 insert into public.configuracion (clave, valor, descripcion, editable_por) values
   ('nombre_clinica',          '"NeoTerapia"'::jsonb,          'Nombre visible de la clinica', 'admin'),
   ('zona_horaria',            '"America/Guatemala"'::jsonb,   'Zona horaria de operacion', 'superadmin'),
-  ('url_publica',             '"http://localhost:4200"'::jsonb, 'Base para los enlaces enviados al paciente', 'superadmin'),
+  ('url_publica',             '"https://neoterapia.vercel.app"'::jsonb, 'Base para los enlaces enviados al paciente', 'superadmin'),
   ('telefono_clinica',        '""'::jsonb,                    'Telefono de contacto', 'admin'),
   ('whatsapp_clinica',        '""'::jsonb,                    'WhatsApp de contacto', 'admin'),
   ('direccion_clinica',       '""'::jsonb,                    'Direccion fisica', 'admin'),
@@ -5656,8 +5689,8 @@ on conflict (codigo) do nothing;
 --     insert into public.perfiles (id, nombre_completo, rol, email, atiende)
 --     values ('PEGUE-AQUI-EL-UUID', 'Miguel Cabrera', 'superadmin', 'su@correo.com', true);
 --
---  3. Cuando publique el sitio, ajuste la URL base de los enlaces que se le
---     envian al paciente (si queda en localhost, esos enlaces no sirven):
+--  3. La URL base de los enlaces que se le envian al paciente ya queda en
+--     https://neoterapia.vercel.app. Solo hay que tocarla si cambia de dominio:
 --
 --     update public.configuracion
 --        set valor = '"https://su-dominio.com"'::jsonb

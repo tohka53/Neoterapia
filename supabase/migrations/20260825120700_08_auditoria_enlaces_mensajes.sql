@@ -308,7 +308,7 @@ declare
   v_asunto   text;
   v_saludo   text;
   v_cuando   text;
-  v_base     text := coalesce(public.config('url_publica') #>> '{}', 'https://neoterapia.gt');
+  v_base     text := coalesce(public.config('url_publica') #>> '{}', 'https://neoterapia.vercel.app');
   v_id       uuid;
   v_tz       text := coalesce(public.config('zona_horaria') #>> '{}', 'America/Guatemala');
 begin

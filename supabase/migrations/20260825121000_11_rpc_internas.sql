@@ -189,7 +189,7 @@ security definer
 set search_path = public
 as $$
 declare
-  v_base   text := coalesce(public.config('url_publica') #>> '{}', 'https://neoterapia.gt');
+  v_base   text := coalesce(public.config('url_publica') #>> '{}', 'https://neoterapia.vercel.app');
   v_conf   text;
   v_canc   text;
 begin
@@ -482,7 +482,7 @@ as $$
 declare
   v_s     public.sesiones%rowtype;
   v_token text;
-  v_base  text := coalesce(public.config('url_publica') #>> '{}', 'https://neoterapia.gt');
+  v_base  text := coalesce(public.config('url_publica') #>> '{}', 'https://neoterapia.vercel.app');
 begin
   select * into v_s from public.sesiones where id = p_sesion_id;
   if not found then

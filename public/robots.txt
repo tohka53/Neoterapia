@@ -1,0 +1,20 @@
+# NeoTerapia · https://neoterapia.vercel.app
+#
+# La portada, el formulario de cita y la politica se indexan: son la cara
+# publica de la clinica. Todo lo demas NO.
+#
+# `/cita/` son los enlaces de un solo uso que recibe el paciente (confirmar,
+# cancelar, evaluacion). Aunque expiran y no muestran historial, no tienen por
+# que aparecer jamas en un buscador. `/panel/` es el sistema interno.
+# Vercel ademas manda `X-Robots-Tag: noindex` en esas dos rutas: robots.txt es
+# una peticion, la cabecera es la orden.
+
+User-agent: *
+Allow: /$
+Allow: /solicitar
+Allow: /politica-de-datos
+Disallow: /cita/
+Disallow: /panel/
+Disallow: /acceso
+
+Sitemap: https://neoterapia.vercel.app/sitemap.xml

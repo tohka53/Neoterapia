@@ -9,7 +9,7 @@
 insert into public.configuracion (clave, valor, descripcion, editable_por) values
   ('nombre_clinica',          '"NeoTerapia"'::jsonb,          'Nombre visible de la clinica', 'admin'),
   ('zona_horaria',            '"America/Guatemala"'::jsonb,   'Zona horaria de operacion', 'superadmin'),
-  ('url_publica',             '"http://localhost:4200"'::jsonb, 'Base para los enlaces enviados al paciente', 'superadmin'),
+  ('url_publica',             '"https://neoterapia.vercel.app"'::jsonb, 'Base para los enlaces enviados al paciente', 'superadmin'),
   ('telefono_clinica',        '""'::jsonb,                    'Telefono de contacto', 'admin'),
   ('whatsapp_clinica',        '""'::jsonb,                    'WhatsApp de contacto', 'admin'),
   ('direccion_clinica',       '""'::jsonb,                    'Direccion fisica', 'admin'),

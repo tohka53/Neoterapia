@@ -53,8 +53,8 @@ cat <<'PIE'
 --     insert into public.perfiles (id, nombre_completo, rol, email, atiende)
 --     values ('PEGUE-AQUI-EL-UUID', 'Miguel Cabrera', 'superadmin', 'su@correo.com', true);
 --
---  3. Cuando publique el sitio, ajuste la URL base de los enlaces que se le
---     envian al paciente (si queda en localhost, esos enlaces no sirven):
+--  3. La URL base de los enlaces que se le envian al paciente ya queda en
+--     https://neoterapia.vercel.app. Solo hay que tocarla si cambia de dominio:
 --
 --     update public.configuracion
 --        set valor = '"https://su-dominio.com"'::jsonb
